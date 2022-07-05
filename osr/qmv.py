@@ -1,7 +1,7 @@
 import torch
 from torch.autograd import Variable
 import os
-os.environ['R_HOME'] = 'xxxx/lib/R'
+# os.environ['R_HOME'] = 'xxxx/lib/R'
 from rpy2.robjects.packages import importr
 from rpy2.robjects import numpy2ri
 import numpy as np
@@ -33,7 +33,7 @@ def revise(args, rec_loss=None):
     np.savetxt('%s/test_pre_after.txt' %args.save_path , test_pre, delimiter=' ', fmt='%d')
 
 
-def revise_cf(args, lvae, feature_y_mean, val_loader, test_loader, rec_loss=None):
+def revise_cf(args, lvae, feature_y_mean, test_loader_seen, test_loader_unseen, rec_loss=None):
     print('Start counterfactual revise ...')
     if not type(rec_loss).__module__ == np.__name__:
         train_rec = np.loadtxt('%s/train_rec.txt' %args.save_path)
@@ -44,7 +44,7 @@ def revise_cf(args, lvae, feature_y_mean, val_loader, test_loader, rec_loss=None
     rec_std = np.std(train_rec)
     rec_thres = rec_mean + 2 * rec_std #95%
 
-    test_rec_cf = lvae.rec_loss_cf(feature_y_mean, val_loader, test_loader, args)
+    test_rec_cf = lvae.rec_loss_cf(feature_y_mean, test_loader_seen, test_loader_unseen, args)
     test_rec_cf = test_rec_cf.cpu().numpy()
     test_pre = np.loadtxt('%s/test_pre.txt' %args.save_path)
     test_pre[(test_rec_cf > rec_thres)] = args.num_classes
@@ -86,9 +86,9 @@ class GAU(object):
             locals()['mu' + str(i)] = np.mean(np.array(locals()['matrix' + str(i)]),axis=0)
             locals()['sigma' + str(i)] = np.cov(np.array((locals()['matrix' + str(i)] - locals()['mu' + str(i)])).T)
             locals()['gau' + str(i)] = [locals()['mu' + str(i)],locals()['sigma' + str(i)]]
-            print(i)
-            print(locals()['mu' + str(i)])
-            print(np.diag(locals()['sigma' + str(i)])**0.5)
+            # print(i)
+            # print(locals()['mu' + str(i)])
+            # print(np.diag(locals()['sigma' + str(i)])**0.5)
             gau.append(locals()['gau' + str(i)])
 
         return gau
@@ -197,7 +197,7 @@ def get_mean_y(train_feature, train_target):
 
     return feature_mean_y
 
-def ocr_test(args, lvae, train_loader, val_loader, test_loader):
+def ocr_test(args, lvae, train_loader, test_loader_seen, test_loader_unseen):
     if not args.use_model:
         revise(args)
         gau = GAU(args)
@@ -207,7 +207,6 @@ def ocr_test(args, lvae, train_loader, val_loader, test_loader):
         train_fea_all = []
         train_tar_all = []
         train_rec_loss_all = []
-
 
         # get train feature
         with torch.no_grad():
@@ -243,6 +242,7 @@ def ocr_test(args, lvae, train_loader, val_loader, test_loader):
                     target_en = torch.eye(args.num_classes)
                     feature_y_mean = lvae.get_yh(target_en.cuda())
                 else:
+                    # Get the class means 
                     feature_y_mean = get_mean_y(train_fea, train_tar)
                     feature_y_mean = torch.cat(feature_y_mean, dim=0).view(args.num_classes, 32)
 
@@ -252,7 +252,7 @@ def ocr_test(args, lvae, train_loader, val_loader, test_loader):
                 else:
                     train_rec_loss = train_rec_loss.cpu().numpy()
 
-                revise_cf(args, lvae, feature_y_mean, val_loader, test_loader, rec_loss=train_rec_loss)
+                revise_cf(args, lvae, feature_y_mean, test_loader_seen, test_loader_unseen, rec_loss=train_rec_loss)
 
         else:
             train_rec_loss = train_rec_loss.cpu().numpy()
@@ -281,12 +281,14 @@ def ocr_test(args, lvae, train_loader, val_loader, test_loader):
     ### write F1 score in one txt in father dir
     save_path_father = '%s/ma_all.txt' %args.save_path[:-2]
     if not os.path.exists(save_path_father):
-        assert args.run_idx == 0
+        # assert args.run_idx == 0
         with open(save_path_father, "w") as f:
             f.write(str(perf_test[2]))
     else:
+        performance_string = str(args.exp_name)+ ', threshold '+ str(args.threshold)+': ' + str(perf_test[2])
         with open(save_path_father, "a") as f:
             f.write('\n')
-            f.write(str(perf_test[2]))
+            f.write(performance_string)
+            # f.write(str(perf_test[2]))
 
 

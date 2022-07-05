@@ -19,28 +19,31 @@ TPIL = transforms.ToPILImage()
 
 
 class MNIST_Dataset(Dataset):
-    def __init__(self):
+    def __init__(self, dataset):
         self.trainset = MNIST(root='./data', train=True, download=True)
         self.testset = MNIST(root='./data', train=False, download=True)
         self.classDict = {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8,
                      '9': 9}
         self.transform = transforms.Compose([transforms.ToTensor(),
                                             transforms.Normalize((0.1307,), (0.3081,))])
+        self.mean = np.array([0.1307,])
+        self.std = np.array([0.3081,])
+        self.dataset = dataset
 
-    def sampler(self, seed, args):
+    def sampler(self, seed):
         if seed is not None:
             random.seed(seed)
         seen_classes = random.sample(range(0, 10), 6)
         unseen_classes = [idx for idx in range(10) if idx not in seen_classes]
 
         osr_trainset, osr_valset, osr_testset = construct_ocr_dataset(self.trainset, self.testset,
-                                                                      seen_classes, unseen_classes, self.transform, args)
+                                                                      seen_classes, unseen_classes, self.transform, self.dataset)
 
         return osr_trainset, osr_valset, osr_testset
 
 
 class CIFAR10_Dataset(Dataset):
-    def __init__(self):
+    def __init__(self, dataset):
         self.trainset = CIFAR10(root='./data', train=True, download=True)
         self.testset = CIFAR10(root='./data', train=False, download=True)
         self.classDict = {'plane': 0, 'car': 1, 'bird': 2, 'cat': 3, 'deer': 4, 'dog': 5, 'frog': 6, 'horse': 7, 'ship': 8,
@@ -58,8 +61,11 @@ class CIFAR10_Dataset(Dataset):
         self.transform_test = transforms.Compose([transforms.Resize(32),
                                                   transforms.ToTensor(),
                                                   transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
+        self.dataset = dataset 
+        self.mean = np.array([0.4914, 0.4822, 0.4465])
+        self.std = np.array([0.2023, 0.1994, 0.2010])
 
-    def sampler(self, seed, args):
+    def sampler(self, seed):
         if seed is not None:
             random.seed(seed)
         seen_classes = random.sample(range(0, 10), 6)
@@ -67,13 +73,13 @@ class CIFAR10_Dataset(Dataset):
         unseen_classes = [idx for idx in range(10) if idx not in seen_classes]
 
         osr_trainset, osr_valset, osr_testset = construct_ocr_dataset_aug(self.trainset, self.testset, seen_classes,
-                                                                      unseen_classes, self.transform_train, self.transform_test, args)
+                                                                      unseen_classes, self.transform_train, self.transform_test, self.dataset)
 
         return osr_trainset, osr_valset, osr_testset
 
 
 class CIFAR100_Dataset(Dataset):
-    def __init__(self):
+    def __init__(self, dataset, unseen_num):
         self.trainset = CIFAR100(root='./data', train=True, download=True)
         self.testset = CIFAR100(root='./data', train=False, download=True)
 
@@ -89,24 +95,25 @@ class CIFAR100_Dataset(Dataset):
         self.transform_test = transforms.Compose([transforms.Resize(32),
                                                   transforms.ToTensor(),
                                                   transforms.Normalize([0.5071, 0.4865, 0.4409], [0.2673, 0.2564, 0.2762])])
+        self.dataset = dataset 
+        self.unseen_num = unseen_num 
 
-    def sampler(self, seed, args):
+    def sampler(self, seed):
         if seed is not None:
             random.seed(seed)
         seen_classes = random.sample(range(0, 100), 15)
         # seen_classes = range(0, 10)
         unseen_classes = [idx for idx in range(100) if idx not in seen_classes]
-        unseen_classes_num = args.unseen_num
-        unseen_classes = random.sample(unseen_classes, unseen_classes_num)
+        unseen_classes = random.sample(unseen_classes, self.unseen_num)
 
         osr_trainset, osr_valset, osr_testset = construct_ocr_dataset_aug(self.trainset, self.testset, seen_classes,
-                                                                      unseen_classes, self.transform_train, self.transform_test, args)
+                                                                      unseen_classes, self.transform_train, self.transform_test, self.dataset)
 
         return osr_trainset, osr_valset, osr_testset
 
 
 class CIFARAdd10_Dataset(Dataset):
-    def __init__(self):
+    def __init__(self, dataset):
         self.trainset = CIFAR10(root='./data', train=True, download=True)
         self.testset = CIFAR10(root='./data', train=False, download=True)
         self.unknownset = CIFAR100(root='./data', train=False, download=True)
@@ -124,8 +131,11 @@ class CIFARAdd10_Dataset(Dataset):
         self.transform_test = transforms.Compose([transforms.Resize(32),
                                                   transforms.ToTensor(),
                                                   transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
+        self.dataset = dataset 
+        self.mean = np.array([0.4914, 0.4822, 0.4465])
+        self.std = np.array([0.2023, 0.1994, 0.2010])
 
-    def sampler(self, seed, args):
+    def sampler(self, seed):
         if seed is not None:
             random.seed(seed)
         # 4 non animal
@@ -136,13 +146,13 @@ class CIFARAdd10_Dataset(Dataset):
         unseen_classes = random.sample(animal_classes, 10)
 
         osr_trainset, osr_valset, osr_testset = construct_ocr_dataset_add(self.trainset, self.testset, self.unknownset, seen_classes,
-                                                                      unseen_classes, self.transform_train, self.transform_test, args)
+                                                                      unseen_classes, self.transform_train, self.transform_test, self.dataset)
 
         return osr_trainset, osr_valset, osr_testset
 
 
 class CIFARAdd50_Dataset(Dataset):
-    def __init__(self):
+    def __init__(self, dataset):
         self.trainset = CIFAR10(root='./data', train=True, download=True)
         self.testset = CIFAR10(root='./data', train=False, download=True)
         self.unknownset = CIFAR100(root='./data', train=False, download=True)
@@ -160,11 +170,12 @@ class CIFARAdd50_Dataset(Dataset):
         self.transform_test = transforms.Compose([transforms.Resize(32),
                                                   transforms.ToTensor(),
                                                   transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
+        self.dataset = dataset 
 
-    def sampler(self, seed, args):
+    def sampler(self, seed):
         if seed is not None:
             random.seed(seed)
-        # 4 non animal
+        # 4 non animals
         seen_classes = [0, 1, 8, 9]
         # animal in CIFAR100
         animal_classes = [1,2,3,4,6,7,11,14,15,18,19,21,24,26,27,29,30,31,32,34,35,36,37,38,42,43,44,45,46,50,55,
@@ -172,12 +183,12 @@ class CIFARAdd50_Dataset(Dataset):
         unseen_classes = random.sample(animal_classes, 50)
 
         osr_trainset, osr_valset, osr_testset = construct_ocr_dataset_add(self.trainset, self.testset, self.unknownset, seen_classes,
-                                                                      unseen_classes, self.transform_train, self.transform_test, args)
+                                                                      unseen_classes, self.transform_train, self.transform_test, self.dataset)
 
         return osr_trainset, osr_valset, osr_testset
 
 class CIFARAddN_Dataset(Dataset):
-    def __init__(self):
+    def __init__(self, dataset, unseen_num):
         self.trainset = CIFAR10(root='./data', train=True, download=True)
         self.testset = CIFAR10(root='./data', train=False, download=True)
         self.unknownset = CIFAR100(root='./data', train=False, download=True)
@@ -195,8 +206,10 @@ class CIFARAddN_Dataset(Dataset):
         self.transform_test = transforms.Compose([transforms.Resize(32),
                                                   transforms.ToTensor(),
                                                   transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
-
-    def sampler(self, seed, args):
+        self.dataset = dataset 
+        self.unseen_num = unseen_num 
+        
+    def sampler(self, seed):
         if seed is not None:
             random.seed(seed)
         # 4 non animal
@@ -204,16 +217,16 @@ class CIFARAddN_Dataset(Dataset):
         # animal in CIFAR100
         animal_classes = [1,2,3,4,6,7,11,14,15,18,19,21,24,26,27,29,30,31,32,34,35,36,37,38,42,43,44,45,46,50,55,
                           63,64,65,66,67,72,73,74,75,77,78,79,80,88,91,93,95,97,98,99]
-        unseen_classes = random.sample(animal_classes, args.unseen_num)
+        unseen_classes = random.sample(animal_classes, self.unseen_num)
 
         osr_trainset, osr_valset, osr_testset = construct_ocr_dataset_add(self.trainset, self.testset, self.unknownset, seen_classes,
-                                                                      unseen_classes, self.transform_train, self.transform_test, args)
+                                                                      unseen_classes, self.transform_train, self.transform_test, self.dataset)
 
         return osr_trainset, osr_valset, osr_testset
 
 
 class SVHN_Dataset(Dataset):
-    def __init__(self):
+    def __init__(self, dataset):
         self.trainset = SVHN(root='./data', split='train', download=True)
         self.testset = SVHN(root='./data', split='test', download=True)
         self.classDict = {'0': 0, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8,
@@ -231,7 +244,9 @@ class SVHN_Dataset(Dataset):
                                                   transforms.Normalize([0.4377, 0.4438, 0.4728],
                                                     [0.1980, 0.2010, 0.1970])])
 
-    def sampler(self, seed, args):
+        self.dataset = dataset 
+
+    def sampler(self, seed):
         if seed is not None:
             random.seed(seed)
         seen_classes = random.sample(range(0, 10), 6)
@@ -239,14 +254,15 @@ class SVHN_Dataset(Dataset):
 
         osr_trainset, osr_valset, osr_testset = construct_ocr_dataset_aug(self.trainset, self.testset,
                                                                       seen_classes, unseen_classes,
-                                                                      self.transform_train, self.transform_test, args)
+                                                                      self.transform_train, self.transform_test, self.dataset)
+
 
         return osr_trainset, osr_valset, osr_testset
 
 
 
-def construct_ocr_dataset(trainset, testset, seen_classes, unseen_classes, transform, args):
-    if args.dataset in ['MNIST', 'CIFAR10']:
+def construct_ocr_dataset(trainset, testset, seen_classes, unseen_classes, transform, dataset):
+    if dataset in ['MNIST', 'CIFAR10']:
         osr_trainset = DatasetBuilder(
             [get_class_i(trainset.data, trainset.targets, idx) for idx in seen_classes],
             transform)
@@ -259,7 +275,7 @@ def construct_ocr_dataset(trainset, testset, seen_classes, unseen_classes, trans
             [get_class_i(testset.data, testset.targets, idx) for idx in unseen_classes],
             transform)
 
-    elif args.dataset in ['SVHN']:
+    elif dataset in ['SVHN']:
         osr_trainset = DatasetBuilder(
             [get_class_i(trainset.data, trainset.labels, idx) for idx in seen_classes],
             transform)
@@ -274,9 +290,8 @@ def construct_ocr_dataset(trainset, testset, seen_classes, unseen_classes, trans
 
     return osr_trainset, osr_valset, osr_testset
 
-
-def construct_ocr_dataset_aug(trainset, testset, seen_classes, unseen_classes, transform_train, transform_test, args):
-    if args.dataset in ['MNIST', 'CIFAR10', 'CIFAR100']:
+def construct_ocr_dataset_aug(trainset, testset, seen_classes, unseen_classes, transform_train, transform_test, dataset, seed=117, correct_split=True):
+    if dataset in ['MNIST', 'CIFAR10', 'CIFAR100']:
         osr_trainset = DatasetBuilder(
             [get_class_i(trainset.data, trainset.targets, idx) for idx in seen_classes],
             transform_train)
@@ -289,7 +304,7 @@ def construct_ocr_dataset_aug(trainset, testset, seen_classes, unseen_classes, t
             [get_class_i(testset.data, testset.targets, idx) for idx in unseen_classes],
             transform_test)
 
-    elif args.dataset in ['SVHN']:
+    elif dataset in ['SVHN']:
         osr_trainset = DatasetBuilder(
             [get_class_i(trainset.data, trainset.labels, idx) for idx in seen_classes],
             transform_train)
@@ -302,11 +317,30 @@ def construct_ocr_dataset_aug(trainset, testset, seen_classes, unseen_classes, t
             [get_class_i(testset.data, testset.labels, idx) for idx in unseen_classes],
             transform_test)
 
+    if correct_split: 
+        testdata_seen = osr_valset
+        testdata_unseen = osr_testset 
+        osr_valset, testset_seen, testset_unseen = val_test_split(testdata_seen, testdata_unseen, seed)
+        osr_testset = [testset_seen, testset_unseen]
 
     return osr_trainset, osr_valset, osr_testset
 
 
-def construct_ocr_dataset_add(trainset, testset, unknownset, seen_classes, unseen_classes, transform_train, transform_test, args):
+def val_test_split(testdata_seen, testdata_unseen, seed): 
+    """ Creates val-test split from seen and unseen data"""
+    
+    n_val = int(len(testdata_seen)/2)
+    n_test = len(testdata_seen) - n_val
+    valset_seen, testset_seen = torch.utils.data.random_split(testdata_seen, [n_val, n_test], generator=torch.Generator().manual_seed(seed))
+
+    n_val = int(len(testdata_unseen)/2)
+    n_test = len(testdata_unseen) - n_val
+    _, testset_unseen = torch.utils.data.random_split(testdata_unseen, [n_val, n_test], generator=torch.Generator().manual_seed(seed))
+
+    return valset_seen, testset_seen, testset_unseen
+
+
+def construct_ocr_dataset_add(trainset, testset, unknownset, seen_classes, unseen_classes, transform_train, transform_test, dataset, seed=117, correct_split=True):
 
     osr_trainset = DatasetBuilder(
         [get_class_i(trainset.data, trainset.targets, idx) for idx in seen_classes],
@@ -319,6 +353,12 @@ def construct_ocr_dataset_add(trainset, testset, unknownset, seen_classes, unsee
     osr_testset = DatasetBuilder(
         [get_class_i(unknownset.data, unknownset.targets, idx) for idx in unseen_classes],
         transform_test)
+
+    if correct_split: 
+        testdata_seen = osr_valset
+        testdata_unseen = osr_testset 
+        osr_valset, testset_seen, testset_unseen = val_test_split(testdata_seen, testdata_unseen, seed)
+        osr_testset = [testset_seen, testset_unseen]
 
     return osr_trainset, osr_valset, osr_testset
 

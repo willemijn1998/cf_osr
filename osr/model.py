@@ -67,8 +67,8 @@ class TCONV(nn.Module):
 
     def decode(self, x):
         x = self.fc(x)
-        x = x.view(-1, self.t_in_ch, self.unflat_dim, self.unflat_dim)
-        h = self.net(x)
+        x = x.view(-1, self.t_in_ch, self.unflat_dim, self.unflat_dim) # 5_1: 512, 1, 1
+        h = self.net(x) # 5_1: 512, 2, 2 
         h_flat = h.view(-1, self.t_out_ch * self.out_dim * self.out_dim)
         mu, var = self.mean_layer(h_flat), self.var_layer(h_flat)
         var = F.softplus(var) + 1e-8
@@ -99,6 +99,97 @@ class FCONV(nn.Module):
         x = x.view(-1, self.t_in_ch, self.unflat_dim, self.unflat_dim)
         x_re = self.final(x)
         return x_re
+
+class SupConLoss(nn.Module):
+    """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
+    It also supports the unsupervised contrastive loss in SimCLR"""
+    def __init__(self, temperature=0.07, contrast_mode='all',
+                 base_temperature=0.2):
+        # base_temperature used to be 0.07
+        super(SupConLoss, self).__init__()
+        self.temperature = temperature
+        self.contrast_mode = contrast_mode
+        self.base_temperature = base_temperature
+
+    def forward(self, features, labels=None, mask=None):
+        """Compute loss for model. If both `labels` and `mask` are None,
+        it degenerates to SimCLR unsupervised loss:
+        https://arxiv.org/pdf/2002.05709.pdf
+        Args:
+            features: hidden vector of shape [bsz, n_views, ...]. n_views is number of augmentations
+            labels: ground truth of shape [bsz].
+            mask: contrastive mask of shape [bsz, bsz], mask_{i,j}=1 if sample j
+                has the same class as sample i. Can be asymmetric.
+        Returns:
+            A loss scalar.
+        """
+        device = (torch.device('cuda')
+                  if features.is_cuda
+                  else torch.device('cpu'))
+
+        if len(features.shape) < 3:
+            raise ValueError('`features` needs to be [bsz, n_views, ...],'
+                             'at least 3 dimensions are required')
+        if len(features.shape) > 3:
+            features = features.view(features.shape[0], features.shape[1], -1)
+
+        batch_size = features.shape[0]
+        if labels is not None and mask is not None:
+            raise ValueError('Cannot define both `labels` and `mask`')
+        elif labels is None and mask is None:
+            mask = torch.eye(batch_size, dtype=torch.float32).to(device)
+        elif labels is not None:
+            labels = labels.contiguous().view(-1, 1)
+            if labels.shape[0] != batch_size:
+                raise ValueError('Num of labels does not match num of features')
+            mask = torch.eq(labels, labels.T).float().to(device)
+        else:
+            mask = mask.float().to(device)
+
+        contrast_count = features.shape[1]
+        contrast_feature = torch.cat(torch.unbind(features, dim=1), dim=0)
+        if self.contrast_mode == 'one':
+            anchor_feature = features[:, 0]
+            anchor_count = 1
+        elif self.contrast_mode == 'all':
+            anchor_feature = contrast_feature
+            anchor_count = contrast_count
+        else:
+            raise ValueError('Unknown mode: {}'.format(self.contrast_mode))
+
+        # compute logits
+        anchor_dot_contrast = torch.div(
+            torch.matmul(anchor_feature, contrast_feature.T),
+            self.temperature)
+
+        # for numerical stability
+        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
+        logits = anchor_dot_contrast - logits_max.detach()
+
+        # tile mask
+        mask = mask.repeat(anchor_count, contrast_count)
+        # mask-out self-contrast cases
+        logits_mask = torch.scatter(
+            torch.ones_like(mask),
+            1,
+            torch.arange(batch_size * anchor_count).view(-1, 1).to(device),
+            0
+        )
+        mask = mask * logits_mask
+
+        # compute log_prob
+        exp_logits = torch.exp(logits) * logits_mask
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True)+ 1e-6)
+        # Changed to log instead of exp because not stable 
+        # log_logits = logits * logits_mask
+        # log_prob = logits - log_logits.sum(1, keepdim=True)
+
+        # compute mean of log-likelihood over positive
+        mean_log_prob_pos = (mask * log_prob).sum(1) / mask.sum(1)
+        # loss
+        loss = -(self.temperature / self.base_temperature) * mean_log_prob_pos
+        loss = loss.view(anchor_count, batch_size).mean()
+        return loss
 
 class LVAE(nn.Module):
     def __init__(self, in_ch=3,
@@ -131,7 +222,7 @@ class LVAE(nn.Module):
         self.latent_dim256 = latent_dim256
         self.latent_dim128 = latent_dim128
         self.latent_dim64 = latent_dim64
-        self.latent_dim32 = latent_dim32
+        self.latent_dim32 = latent_dim32 # 42
         self.num_class = num_class
         self.dataset = dataset
 
@@ -216,16 +307,19 @@ class LVAE(nn.Module):
         enc5_1, mu_up5_1, var_up5_1 = self.CONV5_1.encode(enc4_2)
         enc5_2, mu_latent, var_latent = self.CONV5_2.encode(enc5_1)
 
+        # enc5_2.shape = (64, 512, 1, 1)
+        # mu, var.shape =(64, 42)
+
         # split z and y
         if args.encode_z:
             z_latent_mu, y_latent_mu = mu_latent.split([args.encode_z, 32], dim=1)
             z_latent_var, y_latent_var = var_latent.split([args.encode_z, 32], dim=1)
-            latent = ut.sample_gaussian(mu_latent, var_latent)
-            latent_y = ut.sample_gaussian(y_latent_mu, y_latent_var)
+            latent = ut.sample_gaussian(mu_latent, var_latent, args.device)
+            latent_y = ut.sample_gaussian(y_latent_mu, y_latent_var, args.device)
         else:
             y_latent_mu = mu_latent
             y_latent_var = var_latent
-            latent = ut.sample_gaussian(mu_latent, var_latent)
+            latent = ut.sample_gaussian(mu_latent, var_latent, args.device)
             latent_y = latent
 
 
@@ -234,70 +328,80 @@ class LVAE(nn.Module):
         yh = self.one_hot(y_de)
 
         # partially downwards
-        dec5_1, mu_dn5_1, var_dn5_1 = self.TCONV5_2.decode(latent)
+        dec5_1, mu_dn5_1, var_dn5_1 = self.TCONV5_2.decode(latent) # 64, 42
+        # (512, 2, 2)
         prec_up5_1 = var_up5_1 ** (-1)
         prec_dn5_1 = var_dn5_1 ** (-1)
         qmu5_1 = (mu_up5_1 * prec_up5_1 + mu_dn5_1 * prec_dn5_1) / (prec_up5_1 + prec_dn5_1)
         qvar5_1 = (prec_up5_1 + prec_dn5_1) ** (-1)
-        de_latent5_1 = ut.sample_gaussian(qmu5_1, qvar5_1)
+        de_latent5_1 = ut.sample_gaussian(qmu5_1, qvar5_1, args.device)
 
-        dec4_2, mu_dn4_2, var_dn4_2 = self.TCONV5_1.decode(de_latent5_1)
+        dec4_2, mu_dn4_2, var_dn4_2 = self.TCONV5_1.decode(de_latent5_1) # 
+        # 512, 2, 2
         prec_up4_2 = var_up4_2 ** (-1)
         prec_dn4_2 = var_dn4_2 ** (-1)
         qmu4_2 = (mu_up4_2 * prec_up4_2 + mu_dn4_2 * prec_dn4_2) / (prec_up4_2 + prec_dn4_2)
         qvar4_2 = (prec_up4_2 + prec_dn4_2) ** (-1)
-        de_latent4_2 = ut.sample_gaussian(qmu4_2, qvar4_2)
+        de_latent4_2 = ut.sample_gaussian(qmu4_2, qvar4_2, args.device)
 
         dec4_1, mu_dn4_1, var_dn4_1 = self.TCONV4_2.decode(de_latent4_2)
+        # 512, 4, 4 
         prec_up4_1 = var_up4_1 ** (-1)
         prec_dn4_1 = var_dn4_1 ** (-1)
         qmu4_1 = (mu_up4_1 * prec_up4_1 + mu_dn4_1 * prec_dn4_1) / (prec_up4_1 + prec_dn4_1)
         qvar4_1 = (prec_up4_1 + prec_dn4_1) ** (-1)
-        de_latent4_1 = ut.sample_gaussian(qmu4_1, qvar4_1)
+        de_latent4_1 = ut.sample_gaussian(qmu4_1, qvar4_1, args.device)
 
         dec3_2, mu_dn3_2, var_dn3_2 = self.TCONV4_1.decode(de_latent4_1)
+        # 256, 4, 4
         prec_up3_2 = var_up3_2 ** (-1)
         prec_dn3_2 = var_dn3_2 ** (-1)
         qmu3_2 = (mu_up3_2 * prec_up3_2 + mu_dn3_2 * prec_dn3_2) / (prec_up3_2 + prec_dn3_2)
         qvar3_2 = (prec_up3_2 + prec_dn3_2) ** (-1)
-        de_latent3_2 = ut.sample_gaussian(qmu3_2, qvar3_2)
+        de_latent3_2 = ut.sample_gaussian(qmu3_2, qvar3_2, args.device)
 
         dec3_1, mu_dn3_1, var_dn3_1 = self.TCONV3_2.decode(de_latent3_2)
+        # 256, 8, 8
         prec_up3_1 = var_up3_1 ** (-1)
         prec_dn3_1 = var_dn3_1 ** (-1)
         qmu3_1 = (mu_up3_1 * prec_up3_1 + mu_dn3_1 * prec_dn3_1) / (prec_up3_1 + prec_dn3_1)
         qvar3_1 = (prec_up3_1 + prec_dn3_1) ** (-1)
-        de_latent3_1 = ut.sample_gaussian(qmu3_1, qvar3_1)
+        de_latent3_1 = ut.sample_gaussian(qmu3_1, qvar3_1, args.device)
 
         dec2_2, mu_dn2_2, var_dn2_2 = self.TCONV3_1.decode(de_latent3_1)
+        # 128, 8, 8
         prec_up2_2 = var_up2_2 ** (-1)
         prec_dn2_2 = var_dn2_2 ** (-1)
         qmu2_2 = (mu_up2_2 * prec_up2_2 + mu_dn2_2 * prec_dn2_2) / (prec_up2_2 + prec_dn2_2)
         qvar2_2 = (prec_up2_2 + prec_dn2_2) ** (-1)
-        de_latent2_2 = ut.sample_gaussian(qmu2_2, qvar2_2)
+        de_latent2_2 = ut.sample_gaussian(qmu2_2, qvar2_2, args.device)
 
         dec2_1, mu_dn2_1, var_dn2_1 = self.TCONV2_2.decode(de_latent2_2)
+        # 128, 16, 16 
         prec_up2_1 = var_up2_1 ** (-1)
         prec_dn2_1 = var_dn2_1 ** (-1)
         qmu2_1 = (mu_up2_1 * prec_up2_1 + mu_dn2_1 * prec_dn2_1) / (prec_up2_1 + prec_dn2_1)
         qvar2_1 = (prec_up2_1 + prec_dn2_1) ** (-1)
-        de_latent2_1 = ut.sample_gaussian(qmu2_1, qvar2_1)
+        de_latent2_1 = ut.sample_gaussian(qmu2_1, qvar2_1, args.device)
 
         dec1_2, mu_dn1_2, var_dn1_2 = self.TCONV2_1.decode(de_latent2_1)
+        # 64, 16, 16 
         prec_up1_2 = var_up1_2 ** (-1)
         prec_dn1_2 = var_dn1_2 ** (-1)
         qmu1_2 = (mu_up1_2 * prec_up1_2 + mu_dn1_2 * prec_dn1_2) / (prec_up1_2 + prec_dn1_2)
         qvar1_2 = (prec_up1_2 + prec_dn1_2) ** (-1)
-        de_latent1_2 = ut.sample_gaussian(qmu1_2, qvar1_2)
+        de_latent1_2 = ut.sample_gaussian(qmu1_2, qvar1_2, args.device)
 
         dec1_1, mu_dn1_1, var_dn1_1 = self.TCONV1_2.decode(de_latent1_2)
+        # 64, 32, 32
         prec_up1_1 = var_up1_1 ** (-1)
         prec_dn1_1 = var_dn1_1 ** (-1)
         qmu1_1 = (mu_up1_1 * prec_up1_1 + mu_dn1_1 * prec_dn1_1) / (prec_up1_1 + prec_dn1_1)
         qvar1_1 = (prec_up1_1 + prec_dn1_1) ** (-1)
-        de_latent1_1 = ut.sample_gaussian(qmu1_1, qvar1_1)
+        de_latent1_1 = ut.sample_gaussian(qmu1_1, qvar1_1, args.device)
 
         x_re = self.TCONV1_1.final_decode(de_latent1_1)
+        # 3, 32, 32 
 
         if args.contrastive_loss and self.training:
             self.contra_loss = self.contrastive_loss(x, y_de, x_re, args)
@@ -326,12 +430,12 @@ class LVAE(nn.Module):
         if args.encode_z:
             z_latent_mu, y_latent_mu = mu_latent.split([args.encode_z, 32], dim=1)
             z_latent_var, y_latent_var = var_latent.split([args.encode_z, 32], dim=1)
-            pm_z, pv_z = torch.zeros(z_latent_mu.shape).cuda(), torch.ones(z_latent_var.shape).cuda()
+            pm_z, pv_z = torch.zeros(z_latent_mu.shape).to(args.device), torch.ones(z_latent_var.shape).to(args.device)
         else:
             y_latent_mu = mu_latent
             y_latent_var = var_latent
 
-        pm, pv = torch.zeros(y_latent_mu.shape).cuda(), torch.ones(y_latent_var.shape).cuda()
+        pm, pv = torch.zeros(y_latent_mu.shape).to(args.device), torch.ones(y_latent_var.shape).to(args.device)
         # print("mu1", mu1)
         kl_latent = ut.kl_normal(y_latent_mu, y_latent_var, pm, pv, yh)
         kl5_1 = ut.kl_normal(qmu5_1, qvar5_1, pmu5_1, pvar5_1, 0)
@@ -339,7 +443,7 @@ class LVAE(nn.Module):
         kl4_1 = ut.kl_normal(qmu4_1, qvar4_1, pmu4_1, pvar4_1, 0)
         kl3_2 = ut.kl_normal(qmu3_2, qvar3_2, pmu3_2, pvar3_2, 0)
         kl3_1 = ut.kl_normal(qmu3_1, qvar3_1, pmu3_1, pvar3_1, 0)
-        kl2_2 = ut.kl_normal(qmu2_2, qvar2_2, pmu2_2, pvar2_2, 0)
+        kl2_2 = ut.kl_normal(qmu2_2, qvar2_2, pmu2_2, pvar2_2, 0)  
         kl2_1 = ut.kl_normal(qmu2_1, qvar2_1, pmu2_1, pvar2_1, 0)
         kl1_2 = ut.kl_normal(qmu1_2, qvar1_2, pmu1_2, pvar1_2, 0)
         kl1_1 = ut.kl_normal(qmu1_1, qvar1_1, pmu1_1, pvar1_1, 0)
@@ -358,6 +462,26 @@ class LVAE(nn.Module):
         if args.contrastive_loss:
             contra_loss = self.contra_loss
             nelbo += contra_loss
+
+        if args.mmd_loss: 
+            if args.no_aug: 
+                x_aug = x
+            else: 
+                x_aug = args.transforms(x)
+            self.invar_loss = self.mmd_loss(y_latent_mu, x_aug, y, y_de, args)
+            nelbo += args.eta * self.invar_loss
+
+        if args.supcon_loss: 
+            if args.no_aug: 
+                x_aug = x
+            else: 
+                x_aug = args.transforms(x)
+
+            W_aug, _, _= self.test(x_aug, y_de, args)
+            WW_aug = torch.cat((y_latent_mu.unsqueeze(dim=1), W_aug.unsqueeze(dim=1)), dim=1)
+            self.supcon_loss = self.supcon_critic(WW_aug, y)
+            nelbo += args.theta * self.supcon_loss 
+
         # nelbo = rec
         return nelbo, y_latent_mu, predict, predict_test, x_re,rec,kl,lamda*ce
 
@@ -389,12 +513,12 @@ class LVAE(nn.Module):
         bs = x.size(0)
         ### get current yh for each class
         target_en = torch.eye(args.num_classes)
-        class_yh = self.get_yh(target_en.cuda()) # 6*32
+        class_yh = self.get_yh(target_en.to(args.device)) # 6*32
         yh_size = class_yh.size(1)
 
         neg_class_num = args.num_classes - 1
         # z_neg = z.unsqueeze(1).repeat(1, neg_class_num, 1)
-        y_neg = torch.zeros((bs, neg_class_num, yh_size)).cuda()
+        y_neg = torch.zeros((bs, neg_class_num, yh_size)).to(args.device)
         for i in range(bs):
             y_sample = [idx for idx in range(args.num_classes) if idx != torch.argmax(target[i])]
             y_neg[i] = class_yh[y_sample]
@@ -405,22 +529,36 @@ class LVAE(nn.Module):
 
         x_expand = x.unsqueeze(1).repeat(1, args.num_classes, 1, 1, 1)
         neg_dist = -((x_expand - rec_x_all) ** 2).mean((2,3,4)) * args.temperature  # N*(K+1)
-        label = torch.zeros(bs).cuda().long()
+        label = torch.zeros(bs).to(args.device).long()
         contrastive_loss_euclidean = nn.CrossEntropyLoss()(neg_dist, label)
 
         return contrastive_loss_euclidean
 
+    def mmd_loss(self, W, x_aug, labels, labels_onehot, args): 
+        "MMD loss between input and augmented input"    
+        W_aug, _, _ = self.test(x_aug, labels_onehot, args)
 
-    def rec_loss_cf(self, feature_y_mean, val_loader, test_loader, args):
+        mmd_losses = torch.zeros(args.num_classes)
+
+        for i in range(args.num_classes): 
+            if len(W[labels==i]) == 0 or len(W_aug[labels==i]) == 0: 
+                continue
+            else: 
+                N = len(labels[labels==i])
+            mmd_losses[i] = N * ut.MMD(W[labels==i], W_aug[labels==i], kernel=args.kernel, device=args.device)
+        
+        return torch.mean(mmd_losses)
+
+
+    def rec_loss_cf(self, feature_y_mean, test_loader_seen, test_loader_unseen, args):
         rec_loss_cf_all = []
         class_num = feature_y_mean.size(0)
-        for data_test, target_test in val_loader:
+        for data_test, target_test in test_loader_seen:
             target_test_en = torch.Tensor(target_test.shape[0], args.num_classes)
             target_test_en.zero_()
             target_test_en.scatter_(1, target_test.view(-1, 1), 1)  # one-hot encoding
-            target_test_en = target_test_en.cuda()
-            if args.cuda:
-                data_test, target_test = data_test.cuda(), target_test.cuda()
+            target_test_en = target_test_en.to(args.device)
+            data_test, target_test = data_test.to(args.device), target_test.to(args.device)
             with torch.no_grad():
                 data_test, target_test = Variable(data_test), Variable(target_test)
 
@@ -431,13 +569,12 @@ class LVAE(nn.Module):
             rec_loss_cf_all.append(rec_loss_cf)
 
 
-        for data_test, target_test in test_loader:
+        for data_test, target_test in test_loader_unseen:
             target_test_en = torch.Tensor(target_test.shape[0], args.num_classes)
             target_test_en.zero_()
             # target_test_en.scatter_(1, target_test.view(-1, 1), 1)  # one-hot encoding
-            target_test_en = target_test_en.cuda()
-            if args.cuda:
-                data_test, target_test = data_test.cuda(), target_test.cuda()
+            target_test_en = target_test_en.to(args.device)
+            data_test, target_test = data_test.to(args.device), target_test.to(args.device)
             with torch.no_grad():
                 data_test, target_test = Variable(data_test), Variable(target_test)
 
@@ -458,9 +595,8 @@ class LVAE(nn.Module):
             target_train_en = torch.Tensor(target_train.shape[0], args.num_classes)
             target_train_en.zero_()
             target_train_en.scatter_(1, target_train.view(-1, 1), 1)  # one-hot encoding
-            target_train_en = target_train_en.cuda()
-            if args.cuda:
-                data_train, target_train = data_train.cuda(), target_train.cuda()
+            target_train_en = target_train_en.to(args.device)
+            data_train, target_train = data_train.to(args.device), target_train.to(args.device)
             with torch.no_grad():
                 data_train, target_train = Variable(data_train), Variable(target_train)
 
@@ -477,6 +613,7 @@ class LVAE(nn.Module):
         """
         :param x:
         :param mean_y: list, the class-wise feature y
+        This function 
         """
         if mean_y.dim() == 2:
             class_num = mean_y.size(0)
@@ -518,63 +655,63 @@ class LVAE(nn.Module):
         prec_dn5_1 = var_dn5_1 ** (-1)
         qmu5_1 = (mu_up5_1.repeat(class_num, 1) * prec_up5_1 + mu_dn5_1 * prec_dn5_1) / (prec_up5_1 + prec_dn5_1)
         qvar5_1 = (prec_up5_1 + prec_dn5_1) ** (-1)
-        de_latent5_1 = ut.sample_gaussian(qmu5_1, qvar5_1)
+        de_latent5_1 = ut.sample_gaussian(qmu5_1, qvar5_1, args.device)
 
         dec4_2, mu_dn4_2, var_dn4_2 = self.TCONV5_1.decode(de_latent5_1)
         prec_up4_2 = (var_up4_2 ** (-1)).repeat(class_num, 1)
         prec_dn4_2 = var_dn4_2 ** (-1)
         qmu4_2 = (mu_up4_2.repeat(class_num, 1) * prec_up4_2 + mu_dn4_2 * prec_dn4_2) / (prec_up4_2 + prec_dn4_2)
         qvar4_2 = (prec_up4_2 + prec_dn4_2) ** (-1)
-        de_latent4_2 = ut.sample_gaussian(qmu4_2, qvar4_2)
+        de_latent4_2 = ut.sample_gaussian(qmu4_2, qvar4_2, args.device)
 
         dec4_1, mu_dn4_1, var_dn4_1 = self.TCONV4_2.decode(de_latent4_2)
         prec_up4_1 = (var_up4_1 ** (-1)).repeat(class_num, 1)
         prec_dn4_1 = var_dn4_1 ** (-1)
         qmu4_1 = (mu_up4_1.repeat(class_num, 1) * prec_up4_1 + mu_dn4_1 * prec_dn4_1) / (prec_up4_1 + prec_dn4_1)
         qvar4_1 = (prec_up4_1 + prec_dn4_1) ** (-1)
-        de_latent4_1 = ut.sample_gaussian(qmu4_1, qvar4_1)
+        de_latent4_1 = ut.sample_gaussian(qmu4_1, qvar4_1, args.device)
 
         dec3_2, mu_dn3_2, var_dn3_2 = self.TCONV4_1.decode(de_latent4_1)
         prec_up3_2 = (var_up3_2 ** (-1)).repeat(class_num, 1)
         prec_dn3_2 = var_dn3_2 ** (-1)
         qmu3_2 = (mu_up3_2.repeat(class_num, 1) * prec_up3_2 + mu_dn3_2 * prec_dn3_2) / (prec_up3_2 + prec_dn3_2)
         qvar3_2 = (prec_up3_2 + prec_dn3_2) ** (-1)
-        de_latent3_2 = ut.sample_gaussian(qmu3_2, qvar3_2)
+        de_latent3_2 = ut.sample_gaussian(qmu3_2, qvar3_2, args.device)
 
         dec3_1, mu_dn3_1, var_dn3_1 = self.TCONV3_2.decode(de_latent3_2)
         prec_up3_1 = (var_up3_1 ** (-1)).repeat(class_num, 1)
         prec_dn3_1 = var_dn3_1 ** (-1)
         qmu3_1 = (mu_up3_1.repeat(class_num, 1) * prec_up3_1 + mu_dn3_1 * prec_dn3_1) / (prec_up3_1 + prec_dn3_1)
         qvar3_1 = (prec_up3_1 + prec_dn3_1) ** (-1)
-        de_latent3_1 = ut.sample_gaussian(qmu3_1, qvar3_1)
+        de_latent3_1 = ut.sample_gaussian(qmu3_1, qvar3_1, args.device)
 
         dec2_2, mu_dn2_2, var_dn2_2 = self.TCONV3_1.decode(de_latent3_1)
         prec_up2_2 = (var_up2_2 ** (-1)).repeat(class_num, 1)
         prec_dn2_2 = var_dn2_2 ** (-1)
         qmu2_2 = (mu_up2_2.repeat(class_num, 1) * prec_up2_2 + mu_dn2_2 * prec_dn2_2) / (prec_up2_2 + prec_dn2_2)
         qvar2_2 = (prec_up2_2 + prec_dn2_2) ** (-1)
-        de_latent2_2 = ut.sample_gaussian(qmu2_2, qvar2_2)
+        de_latent2_2 = ut.sample_gaussian(qmu2_2, qvar2_2, args.device)
 
         dec2_1, mu_dn2_1, var_dn2_1 = self.TCONV2_2.decode(de_latent2_2)
         prec_up2_1 = (var_up2_1 ** (-1)).repeat(class_num, 1)
         prec_dn2_1 = var_dn2_1 ** (-1)
         qmu2_1 = (mu_up2_1.repeat(class_num, 1) * prec_up2_1 + mu_dn2_1 * prec_dn2_1) / (prec_up2_1 + prec_dn2_1)
         qvar2_1 = (prec_up2_1 + prec_dn2_1) ** (-1)
-        de_latent2_1 = ut.sample_gaussian(qmu2_1, qvar2_1)
+        de_latent2_1 = ut.sample_gaussian(qmu2_1, qvar2_1, args.device)
 
         dec1_2, mu_dn1_2, var_dn1_2 = self.TCONV2_1.decode(de_latent2_1)
         prec_up1_2 = (var_up1_2 ** (-1)).repeat(class_num, 1)
         prec_dn1_2 = var_dn1_2 ** (-1)
         qmu1_2 = (mu_up1_2.repeat(class_num, 1) * prec_up1_2 + mu_dn1_2 * prec_dn1_2) / (prec_up1_2 + prec_dn1_2)
         qvar1_2 = (prec_up1_2 + prec_dn1_2) ** (-1)
-        de_latent1_2 = ut.sample_gaussian(qmu1_2, qvar1_2)
+        de_latent1_2 = ut.sample_gaussian(qmu1_2, qvar1_2, args.device)
 
         dec1_1, mu_dn1_1, var_dn1_1 = self.TCONV1_2.decode(de_latent1_2)
         prec_up1_1 = (var_up1_1 ** (-1)).repeat(class_num, 1)
         prec_dn1_1 = var_dn1_1 ** (-1)
         qmu1_1 = (mu_up1_1.repeat(class_num, 1) * prec_up1_1 + mu_dn1_1 * prec_dn1_1) / (prec_up1_1 + prec_dn1_1)
         qvar1_1 = (prec_up1_1 + prec_dn1_1) ** (-1)
-        de_latent1_1 = ut.sample_gaussian(qmu1_1, qvar1_1)
+        de_latent1_1 = ut.sample_gaussian(qmu1_1, qvar1_1, args.device)
 
         x_re = self.TCONV1_1.final_decode(de_latent1_1)
 
@@ -582,3 +719,4 @@ class LVAE(nn.Module):
 
 
 
+ 

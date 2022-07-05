@@ -3,6 +3,7 @@
 ### Part of Code borrow from "CGDL"
 
 from __future__ import division
+from email.headerregistry import ContentTransferEncodingHeader
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,11 +18,13 @@ from tensorboardX import SummaryWriter
 import argparse
 import os
 import time
-import utils
+from utils import * 
 from dataloader import MNIST_Dataset, CIFAR10_Dataset, SVHN_Dataset, CIFARAdd10_Dataset, CIFARAdd50_Dataset, CIFARAddN_Dataset
 #from keras.utils import to_categorical
-from model import LVAE
+from model import LVAE, SupConLoss
+from model2 import LVAE2
 from qmv import ocr_test
+# from get_plots import plot_rec 
 
 # os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 
@@ -54,25 +57,40 @@ def get_args():
     parser.add_argument('--baseline', action="store_true", default=False, help='If is the bseline?')
     parser.add_argument('--use_model', action="store_true", default=False, help='If use model to get the train feature')
     parser.add_argument('--encode_z', type=int, default=None, help='If encode z and dim of z')
-    parser.add_argument("--contrastive_loss", action="store_true", default=False, help="Use contrastive loss")
+    parser.add_argument("--contrastive_loss", type=int, default=0, help="Use contrastive loss")
     parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for contrastive loss")
     parser.add_argument("--contra_lambda", type=float, default=1.0, help="Scaling factor of contrastive loss")
     parser.add_argument("--save_epoch", type=int, default=None, help="save model in this epoch")
     parser.add_argument("--exp", type=int, default=0, help="which experiment")
     parser.add_argument("--unseen_num", type=int, default=13, help="unseen class num in CIFAR100")
+        # mmd params
+    parser.add_argument("--mmd_loss", type=int, default=0, help='Use MMD loss?')
+    parser.add_argument('--s_jitter', type=float, default=0.5, help='Strength for color jitter')
+    parser.add_argument('--p_grayscale', type=float, default=0.3, help='Probability of random grayscale')
+    parser.add_argument('--gamma', type=float, default=1.0, help='Weight for kernel MMD loss')
+    parser.add_argument('--eta', type=int, default=1, help='Weight for mmd loss')
+    parser.add_argument('--kernel', type=str, default='multiscale', help='Which kernel to use for MMD loss')    
+        # supcon params
+    parser.add_argument('--supcon_loss', type=int, default=0, help='Use supcon loss? ')
+    parser.add_argument('--con_temperature', type=float, default=0.07, help='Temperature for supcon loss')
+    parser.add_argument('--theta', type=float, default=0.2, help='Weight for supcon loss')
+
 
     # test
     parser.add_argument('--cf', action="store_true", default=False, help='use counterfactual generation')
     parser.add_argument('--cf_threshold', action="store_true", default=False, help='use counterfactual threshold in revise_cf')
     parser.add_argument('--yh', action="store_true", default=False, help='use yh rather than feature_y_mean')
     parser.add_argument('--use_model_gau', action="store_true", default=False, help='use feature by model in gau')
-
+    parser.add_argument('--correct_split', action='store_true', default=False, help='Use the correct test-val split?')
+    parser.add_argument('--rm_skips', action='store_true', default=False, help='Remove skip connections? ')
+    parser.add_argument('--no_aug', type=int, default=0, help="No augmentation for losses?")
+    parser.add_argument('--get_plots', action= 'store_true', default=False, help='Plot images?')
 
     args = parser.parse_args()
     return args
 
 def control_seed(args):
-    # seed
+    # seed 
     args.cuda = torch.cuda.is_available()
     torch.manual_seed(args.seed)
     if args.cuda:
@@ -120,10 +138,7 @@ def train(args, lvae):
             target_en.zero_()
             target_en.scatter_(1, target.view(-1, 1), 1)  # one-hot encoding
             target_en = target_en.to(device)
-            if args.cuda:
-                data = data.cuda()
-                target = target.cuda()
-            data, target = Variable(data), Variable(target)
+            data, target = Variable(data).to(args.device), Variable(target).to(args.device)
 
             loss, mu, output, output_mu, x_re, rec, kl, ce = lvae.loss(data, target, target_en, next(beta), args.lamda, args)
             rec_loss = (x_re - data).pow(2).sum((3, 2, 1))
@@ -172,13 +187,17 @@ def train(args, lvae):
 
         # write into the tensorboard
         if args.tensorboard:
-            writer.add_scalar("loss_all", loss.data/len(data), epoch)
-            writer.add_scalar("rec_loss", rec.data/ len(data), epoch)
-            writer.add_scalar("kl_loss", kl.data/len(data), epoch)
-            writer.add_scalar("ce_loss", ce.data/len(data), epoch)
-            writer.add_scalar("Acc_train", train_acc, epoch)
+            writer.add_scalar("Loss/train", loss.data/len(data), epoch)
+            writer.add_scalar("Reconstruction/train", rec.data/ len(data), epoch)
+            writer.add_scalar("KL/train", kl.data/len(data), epoch)
+            writer.add_scalar("CE/train", ce.data/len(data), epoch)
+            writer.add_scalar("Accuracy/train", train_acc, epoch)
             if args.contrastive_loss:
-                writer.add_scalar("contra_loss", contra_loss.data / len(data), epoch)
+                writer.add_scalar("Contrastive/train", contra_loss.data / len(data), epoch)
+            if args.mmd_loss: 
+                writer.add_scalar("MMD/train", lvae.invar_loss.data/len(data), epoch)
+            if args.supcon_loss: 
+                writer.add_scalar("SupCon/train", lvae.supcon_loss.data/len(data), epoch)
 
 
         # val on the val set
@@ -194,8 +213,7 @@ def train(args, lvae):
                 target_val_en.zero_()
                 target_val_en.scatter_(1, target_val.view(-1, 1), 1)  # one-hot encoding
                 target_val_en = target_val_en.to(device)
-                if args.cuda:
-                    data_val, target_val = data_val.cuda(), target_val.cuda()
+                data_val, target_val = data_val.to(args.device), target_val.to(args.device)
                 with torch.no_grad():
                     data_val, target_val = Variable(data_val), Variable(target_val)
 
@@ -218,11 +236,11 @@ def train(args, lvae):
 
             # write into the tensorboard
             if args.tensorboard:
-                writer.add_scalar("val_loss_all", val_loss, epoch)
-                writer.add_scalar("val_rec_loss", val_rec, epoch)
-                writer.add_scalar("val_kl_loss", val_kl, epoch)
-                writer.add_scalar("val_ce_loss", val_ce, epoch)
-                writer.add_scalar("Acc_val", val_acc, epoch)
+                writer.add_scalar("Loss/val", val_loss, epoch)
+                writer.add_scalar("Reconstruction/val", val_rec, epoch)
+                writer.add_scalar("KL/val", val_kl, epoch)
+                writer.add_scalar("CE/val", val_ce, epoch)
+                writer.add_scalar("Accuracy/val", val_acc, epoch)
 
 
             ## if val best
@@ -250,15 +268,13 @@ def train(args, lvae):
                 open('%s/test_tar.txt' % args.save_path, 'w').close()
                 open('%s/test_pre.txt' % args.save_path, 'w').close()
                 open('%s/test_rec.txt' % args.save_path, 'w').close()
-
-
-                for data_test, target_test in val_loader:
+                
+                for data_test, target_test in test_loader_seen:
                     target_test_en = torch.Tensor(target_test.shape[0], args.num_classes)
                     target_test_en.zero_()
                     target_test_en.scatter_(1, target_test.view(-1, 1), 1)  # one-hot encoding
                     target_test_en = target_test_en.to(device)
-                    if args.cuda:
-                        data_test, target_test = data_test.cuda(), target_test.cuda()
+                    data_test, target_test = data_test.to(args.device), target_test.to(args.device)
                     with torch.no_grad():
                         data_test, target_test = Variable(data_test), Variable(target_test)
 
@@ -287,10 +303,10 @@ def train(args, lvae):
 
 
                 # test on test set
-                for data_omn, target_omn in test_loader:
+                for data_omn, target_omn in test_loader_unseen:
                     tar_omn = torch.from_numpy(args.num_classes * np.ones(target_omn.shape[0]))
-                    if args.cuda:
-                        data_omn = data_omn.cuda()
+                    data_omn = data_omn.to(args.device) 
+                    tar_omn = tar_omn.to(args.device)
                     with torch.no_grad():
                         data_omn = Variable(data_omn)
 
@@ -317,6 +333,7 @@ def train(args, lvae):
                     with open('%s/test_rec.txt' % args.save_path, 'ab') as l_test:
                         np.savetxt(l_test, rec_omn, fmt='%f', delimiter=' ', newline='\r')
                         l_test.write(b'\n')
+                
 
 
     open('%s/train_fea.txt' % args.save_path, 'w').close()  # clear
@@ -349,40 +366,47 @@ if __name__ == '__main__':
     control_seed(args)
 
     if args.dataset == "MNIST":
-        load_dataset = MNIST_Dataset()
+        load_dataset = MNIST_Dataset(args.dataset)
         args.num_classes = 6
         in_channel = 1
     elif args.dataset == "CIFAR10":
-        load_dataset = CIFAR10_Dataset()
+        load_dataset = CIFAR10_Dataset(args.dataset)
         args.num_classes = 6
         in_channel = 3
     elif args.dataset == "SVHN":
-        load_dataset = SVHN_Dataset()
+        load_dataset = SVHN_Dataset(args.dataset)
         args.num_classes = 6
         in_channel = 3
     elif args.dataset == "CIFARAdd10":
-        load_dataset = CIFARAdd10_Dataset()
+        load_dataset = CIFARAdd10_Dataset(args.dataset)
         args.num_classes = 4
         in_channel = 3
     elif args.dataset == "CIFARAdd50":
-        load_dataset = CIFARAdd50_Dataset()
+        load_dataset = CIFARAdd50_Dataset(args.dataset)
         args.num_classes = 4
         in_channel = 3
     elif args.dataset == "TinyImageNet":
-        load_dataset = TinyImageNet_Dataset()
+        load_dataset = TinyImageNet_Dataset(args.dataset)
         args.num_classes = 20
         in_channel = 3
     elif args.dataset == "CIFAR100":
-        load_dataset = CIFAR100_Dataset()
+        load_dataset = CIFAR100_Dataset(args.dataset)
         args.num_classes = 15
         in_channel = 3
     elif args.dataset == "CIFARAddN":
-        load_dataset = CIFARAddN_Dataset()
+        load_dataset = CIFARAddN_Dataset(args.dataset, args.unseen_num)
         args.num_classes = 4
         in_channel = 3
 
-    exp_name = utils.get_exp_name(args)
-    print("Experiment: %s" % exp_name)
+
+    args.exp  = args.exp - 1
+    exp_name = get_exp_name(args) # lamda100-...
+    args.exp_name = exp_name
+    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")    
+    args.transforms = get_transforms(args.s_jitter, args.p_grayscale)
+    config = vars(args)
+
+    print("Experiment: {} \n with hyperparameters: {}".format(exp_name,config))
 
     ### run experiment 1/5 times
     for run_idx in range(args.exp, args.exp+1):
@@ -390,7 +414,7 @@ if __name__ == '__main__':
         args.run_idx = run_idx
         seed_sampler = int(args.seed_sampler.split(' ')[run_idx])
         # seed_sampler = None
-        save_path = 'results/%s/%s/%s' %(args.dataset, exp_name, str(run_idx))
+        save_path = 'results/%s' %(exp_name)
         args.save_path = save_path
         if not os.path.exists(save_path):
             os.makedirs(save_path)
@@ -399,7 +423,15 @@ if __name__ == '__main__':
         if args.encode_z:
             latent_dim += args.encode_z
 
-        lvae = LVAE(in_ch=in_channel,
+        if not args.rm_skips: 
+            lvae = LVAE(in_ch=in_channel,
+                    out_ch64=64, out_ch128=128, out_ch256=256, out_ch512=512,
+                    kernel1=1, kernel2=2, kernel3=3, padding0=0, padding1=1, stride1=1, stride2=2,
+                    flat_dim32=32, flat_dim16=16, flat_dim8=8, flat_dim4=4, flat_dim2=2, flat_dim1=1,
+                    latent_dim512=512, latent_dim256=256, latent_dim128=128, latent_dim64=64, latent_dim32=latent_dim,
+                    num_class=args.num_classes, dataset=args.dataset, args=args)
+        else: 
+            lvae = LVAE2(in_ch=in_channel,
                     out_ch64=64, out_ch128=128, out_ch256=256, out_ch512=512,
                     kernel1=1, kernel2=2, kernel3=3, padding0=0, padding1=1, stride1=1, stride2=2,
                     flat_dim32=32, flat_dim16=16, flat_dim8=8, flat_dim4=4, flat_dim2=2, flat_dim1=1,
@@ -410,13 +442,22 @@ if __name__ == '__main__':
         device = torch.device("cuda" if use_cuda else "cpu")
 
         # data loader
-        train_dataset, val_dataset, test_dataset = load_dataset.sampler(seed_sampler, args)
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
-        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
-        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+        train_dataset, val_dataset, test_dataset = load_dataset.sampler(seed_sampler)
+
+        if args.correct_split: 
+            testdata_seen, testdata_unseen = test_dataset 
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False, num_workers=1, pin_memory=True)
+            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=1, pin_memory=True)
+            test_loader_seen = DataLoader(testdata_seen, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=1, pin_memory=True)
+            test_loader_unseen = DataLoader(testdata_unseen, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=1, pin_memory=True)
+        else: 
+            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=1)
+            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=1)
+            test_loader_seen = val_loader 
+            test_loader_unseen = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=1)
 
         # Model
-        lvae.cuda()
+        lvae.to(args.device)
         nllloss = nn.NLLLoss().to(device)
 
         # optimzer
@@ -426,28 +467,38 @@ if __name__ == '__main__':
         beta = DeterministicWarmup(n=50, t_max=1)  # Linear warm-up from 0 to 1 over 50 epoch
         if args.beta_anneal != 0:
             args.beta_anneal = DeterministicWarmup(n=args.beta_anneal, t_max=args.beta_z)
+        lvae.supcon_critic = SupConLoss(args.con_temperature)
 
 
         if args.eval:
             # load train model
-            states = torch.load(os.path.join(args.save_path, 'model.pkl'))
+            states = torch.load(os.path.join(args.save_path, 'model.pkl'), map_location=args.device)
             lvae.load_state_dict(states['model'])
 
-            ocr_test(args, lvae, train_loader, val_loader, test_loader)
+            if args.get_plots: 
+                plot_loader = DataLoader(train_dataset, batch_size=5, shuffle=True, drop_last=False, num_workers=1, pin_memory=True)
+                # plot_rec(lvae, plot_loader, args.transforms, args)
+
+                # point_cloud(model, dataset)
+
+            
+            ocr_test(args, lvae, train_loader, test_loader_seen, test_loader_unseen)
 
         else:
             # Prepare summary writer
             if args.tensorboard:
                 log_dir = "runs/%s" % (exp_name)
                 writer = SummaryWriter(log_dir)
+                config_md = get_hparam_table(config)
+                writer.add_text('Config', config_md)
 
             best_val_loss, best_val_epoch = train(args, lvae)
             print('Finally!Best Epoch: {},  Best Val Loss: {:.4f}'.format(best_val_epoch, best_val_loss))
 
             if args.use_model:
                 # load train model
-                states = torch.load(os.path.join(args.save_path, 'model.pkl'))
+                states = torch.load(os.path.join(args.save_path, 'model.pkl'), map_location=args.device)
                 lvae.load_state_dict(states['model'])
 
             # perform test
-            ocr_test(args, lvae, train_loader, val_loader, test_loader)
+            ocr_test(args, lvae, train_loader, test_loader_seen, test_loader_unseen)
