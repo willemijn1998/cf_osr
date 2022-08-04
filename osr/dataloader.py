@@ -3,11 +3,15 @@ import torchvision
 import torchvision.transforms as transforms
 from torchvision.datasets import MNIST, CIFAR10, CIFAR100, SVHN
 from torch.utils.data import Dataset, DataLoader
+from torchvision import models, datasets
 import numpy as np
 import random
 import json
 import cv2
 from PIL import Image
+import matplotlib.pyplot as plt
+import urllib 
+import os
 
 # Transformations
 RC   = transforms.RandomCrop(32, padding=4)
@@ -46,8 +50,8 @@ class CIFAR10_Dataset(Dataset):
     def __init__(self, dataset):
         self.trainset = CIFAR10(root='./data', train=True, download=True)
         self.testset = CIFAR10(root='./data', train=False, download=True)
-        self.classDict = {'plane': 0, 'car': 1, 'bird': 2, 'cat': 3, 'deer': 4, 'dog': 5, 'frog': 6, 'horse': 7, 'ship': 8,
-                     'truck': 9}
+        self.classDict = {0: 'plane', 1:  'car', 2: 'bird', 3: 'cat', 4: 'deer', 5: 'dog', 6: 'frog', 7: 'horse', 8: 'ship',
+                     9: 'truck'}
 
         self.transform_train = transforms.Compose([
             transforms.Resize(32),
@@ -221,7 +225,6 @@ class CIFARAddN_Dataset(Dataset):
 
         osr_trainset, osr_valset, osr_testset = construct_ocr_dataset_add(self.trainset, self.testset, self.unknownset, seen_classes,
                                                                       unseen_classes, self.transform_train, self.transform_test, self.dataset)
-
         return osr_trainset, osr_valset, osr_testset
 
 
@@ -252,7 +255,7 @@ class SVHN_Dataset(Dataset):
         seen_classes = random.sample(range(0, 10), 6)
         unseen_classes = [idx for idx in range(10) if idx not in seen_classes]
 
-        osr_trainset, osr_valset, osr_testset = construct_ocr_dataset_aug(self.trainset, self.testset,
+        osr_trainset, osr_valset, osr_testset = construct_ocr_dataset_aug(self.trainset, self.testset, 
                                                                       seen_classes, unseen_classes,
                                                                       self.transform_train, self.transform_test, self.dataset)
 
@@ -260,8 +263,67 @@ class SVHN_Dataset(Dataset):
         return osr_trainset, osr_valset, osr_testset
 
 
+class TinyImageNet_Dataset(Dataset):
+    def __init__(self, num_classes):  
 
-def construct_ocr_dataset(trainset, testset, seen_classes, unseen_classes, transform, dataset):
+        self.mean = np.array([0.485, 0.456, 0.406])
+        self.std = np.array([0.229, 0.224, 0.225])
+ 
+        self.transform_train = transforms.Compose([
+            transforms.Resize((32,32)),
+            # transforms.RandomResizedCrop(32, scale=(0.8, 1.0)),
+            transforms.RandomHorizontalFlip(0.5),
+            transforms.RandomRotation(10),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=self.mean, std=self.std),
+        ])
+        
+        self.transform_test = transforms.Compose([transforms.Resize((32,32)),
+                                                  transforms.ToTensor(),
+                                                  transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
+        
+        self.trainset = datasets.ImageFolder('./data/tiny-imagenet-200/train')
+        self.testset = datasets.ImageFolder('./data/tiny-imagenet-200/val/images')
+        
+        self.num_classes = num_classes
+
+    def sampler(self, seed):
+        if seed is not None:
+            random.seed(seed)
+
+        seen_classes = random.sample(range(0, 200), self.num_classes)
+        # seen_classes = range(0, 10)
+        unseen_classes = [idx for idx in range(200) if idx not in seen_classes]
+
+        osr_trainset, osr_valset, osr_testset = construct_dataset_TImN(self.trainset, self.trainset.targets, self.testset, self.testset.targets,
+                                                                seen_classes, unseen_classes, self.transform_train, self.transform_test)
+
+        return osr_trainset, osr_valset, osr_testset
+
+
+def construct_dataset_TImN(trainset, train_targets, testset, test_targets, seen_classes, unseen_classes, transform_train, transform_test, seed=117, correct_split=True):
+    osr_trainset = DatasetBuilder(
+        [get_class_i(trainset, train_targets, idx) for idx in seen_classes],
+        transform_train)
+
+    osr_valset = DatasetBuilder(
+        [get_class_i(testset, test_targets, idx) for idx in seen_classes],
+        transform_test)
+
+    osr_testset = DatasetBuilder(
+        [get_class_i(testset, test_targets, idx) for idx in unseen_classes],
+        transform_test)
+
+    if correct_split: 
+        testdata_seen = osr_valset
+        testdata_unseen = osr_testset 
+        osr_valset, testset_seen, testset_unseen = val_test_split(testdata_seen, testdata_unseen, seed)
+        print(len(osr_valset), len(testset_seen), len(testset_unseen))
+        osr_testset = [testset_seen, testset_unseen]
+
+    return osr_trainset, osr_valset, osr_testset
+
+def construct_ocr_dataset(trainset, testset, seen_classes, unseen_classes, transform, dataset, seed=117, correct_split=True):
     if dataset in ['MNIST', 'CIFAR10']:
         osr_trainset = DatasetBuilder(
             [get_class_i(trainset.data, trainset.targets, idx) for idx in seen_classes],
@@ -288,7 +350,15 @@ def construct_ocr_dataset(trainset, testset, seen_classes, unseen_classes, trans
             [get_class_i(testset.data, testset.labels, idx) for idx in unseen_classes],
             transform)
 
+    if correct_split: 
+        testdata_seen = osr_valset
+        testdata_unseen = osr_testset 
+        osr_valset, testset_seen, testset_unseen = val_test_split(testdata_seen, testdata_unseen, seed)
+        osr_testset = [testset_seen, testset_unseen]
+
     return osr_trainset, osr_valset, osr_testset
+
+
 
 def construct_ocr_dataset_aug(trainset, testset, seen_classes, unseen_classes, transform_train, transform_test, dataset, seed=117, correct_split=True):
     if dataset in ['MNIST', 'CIFAR10', 'CIFAR100']:
@@ -392,7 +462,6 @@ class DatasetBuilder(Dataset):
 
     def __getitem__(self, i):
         class_label, index_wrt_class = self.index_of_which_bin(self.lengths, i)
-
         img = self.datasets[class_label][index_wrt_class]
 
         if isinstance(img, torch.Tensor):
@@ -403,8 +472,9 @@ class DatasetBuilder(Dataset):
             img = Image.fromarray(img)
         elif isinstance(img, tuple): #ImageNet
             # img = Image.open(img[0])
-            img = cv2.imread(img[0])
-            img = Image.fromarray(img)
+            img = img[0]
+            # img = cv2.imread(img[0])
+            # img = Image.fromarray(img[0].numpy(), mode='L')
 
         img = self.transformFunc(img)
         return img, class_label

@@ -19,11 +19,13 @@ import argparse
 import os
 import time
 from utils import * 
-from dataloader import MNIST_Dataset, CIFAR10_Dataset, SVHN_Dataset, CIFARAdd10_Dataset, CIFARAdd50_Dataset, CIFARAddN_Dataset
+from dataloader import MNIST_Dataset, CIFAR10_Dataset, SVHN_Dataset, CIFARAdd10_Dataset, CIFARAdd50_Dataset, CIFARAddN_Dataset, TinyImageNet_Dataset
 #from keras.utils import to_categorical
 from model import LVAE, SupConLoss
 from model2 import LVAE2
 from qmv import ocr_test
+# import wandb
+
 # from get_plots import plot_rec 
 
 # os.environ['CUDA_VISIBLE_DEVICES'] = '2'
@@ -60,15 +62,16 @@ def get_args():
     parser.add_argument("--contrastive_loss", type=int, default=0, help="Use contrastive loss")
     parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for contrastive loss")
     parser.add_argument("--contra_lambda", type=float, default=1.0, help="Scaling factor of contrastive loss")
+    parser.add_argument("--rec_lamda", type=float, default=1.0, help="Scaling factor of reconstruction loss")
     parser.add_argument("--save_epoch", type=int, default=None, help="save model in this epoch")
-    parser.add_argument("--exp", type=int, default=0, help="which experiment")
+    parser.add_argument("--exp", type=int, default=1, help="which experiment")
     parser.add_argument("--unseen_num", type=int, default=13, help="unseen class num in CIFAR100")
         # mmd params
     parser.add_argument("--mmd_loss", type=int, default=0, help='Use MMD loss?')
     parser.add_argument('--s_jitter', type=float, default=0.5, help='Strength for color jitter')
     parser.add_argument('--p_grayscale', type=float, default=0.3, help='Probability of random grayscale')
     parser.add_argument('--gamma', type=float, default=1.0, help='Weight for kernel MMD loss')
-    parser.add_argument('--eta', type=int, default=1, help='Weight for mmd loss')
+    parser.add_argument('--eta', type=float, default=1.0, help='Weight for mmd loss')
     parser.add_argument('--kernel', type=str, default='multiscale', help='Which kernel to use for MMD loss')    
         # supcon params
     parser.add_argument('--supcon_loss', type=int, default=0, help='Use supcon loss? ')
@@ -82,7 +85,7 @@ def get_args():
     parser.add_argument('--yh', action="store_true", default=False, help='use yh rather than feature_y_mean')
     parser.add_argument('--use_model_gau', action="store_true", default=False, help='use feature by model in gau')
     parser.add_argument('--correct_split', action='store_true', default=False, help='Use the correct test-val split?')
-    parser.add_argument('--rm_skips', action='store_true', default=False, help='Remove skip connections? ')
+    parser.add_argument('--rm_skips', type=int, default=0, help='Remove skip connections? ')
     parser.add_argument('--no_aug', type=int, default=0, help="No augmentation for losses?")
     parser.add_argument('--get_plots', action= 'store_true', default=False, help='Plot images?')
 
@@ -186,18 +189,18 @@ def train(args, lvae):
         print('Train_Acc: {}/{} ({:.2f}%)'.format(correct_train, len(train_loader.dataset), train_acc))
 
         # write into the tensorboard
-        if args.tensorboard:
-            writer.add_scalar("Loss/train", loss.data/len(data), epoch)
-            writer.add_scalar("Reconstruction/train", rec.data/ len(data), epoch)
-            writer.add_scalar("KL/train", kl.data/len(data), epoch)
-            writer.add_scalar("CE/train", ce.data/len(data), epoch)
-            writer.add_scalar("Accuracy/train", train_acc, epoch)
-            if args.contrastive_loss:
-                writer.add_scalar("Contrastive/train", contra_loss.data / len(data), epoch)
-            if args.mmd_loss: 
-                writer.add_scalar("MMD/train", lvae.invar_loss.data/len(data), epoch)
-            if args.supcon_loss: 
-                writer.add_scalar("SupCon/train", lvae.supcon_loss.data/len(data), epoch)
+        # if args.tensorboard:
+        writer.add_scalar("Loss/train", loss.data/len(data), epoch)
+        writer.add_scalar("Reconstruction/train", rec.data/ len(data), epoch)
+        writer.add_scalar("KL/train", kl.data/len(data), epoch)
+        writer.add_scalar("CE/train", ce.data/len(data), epoch)
+        writer.add_scalar("Accuracy/train", train_acc, epoch)
+        if args.contrastive_loss:
+            writer.add_scalar("Contrastive/train", contra_loss.data / len(data), epoch)
+        if args.mmd_loss: 
+            writer.add_scalar("MMD/train", lvae.invar_loss.data/len(data), epoch)
+        if args.supcon_loss: 
+            writer.add_scalar("SupCon/train", lvae.supcon_loss.data/len(data), epoch)
 
 
         # val on the val set
@@ -208,7 +211,9 @@ def train(args, lvae):
             total_val_rec = 0
             total_val_kl = 0
             total_val_ce = 0
+            n_val = 0
             for data_val, target_val in val_loader:
+                n_val += len(target_val)
                 target_val_en = torch.Tensor(target_val.shape[0], args.num_classes)
                 target_val_en.zero_()
                 target_val_en.scatter_(1, target_val.view(-1, 1), 1)  # one-hot encoding
@@ -226,21 +231,27 @@ def train(args, lvae):
                 vallabel = output_val.data.max(1)[1]  # get the index of the max log-probability
                 correct_val += vallabel.eq(target_val.view_as(vallabel)).sum().item()
 
-            val_loss = total_val_loss / len(val_loader.dataset)
-            val_rec = total_val_rec / len(val_loader.dataset)
-            val_kl = total_val_kl / len(val_loader.dataset)
-            val_ce = total_val_ce / len(val_loader.dataset)
+            val_loss = total_val_loss / n_val
+            val_rec = total_val_rec / n_val
+            val_kl = total_val_kl / n_val
+            val_ce = total_val_ce / n_val
             print('====> Epoch: {} Val loss: {:.3f}/{} ({:.3f}={:.3f}+{:.3f}+{:.3f})'.format(epoch, total_val_loss, len(val_loader.dataset), val_loss, val_rec, val_kl, val_ce))
             val_acc = float(100 * correct_val) / len(val_loader.dataset)
             print('Val_Acc: {}/{} ({:.2f}%)'.format(correct_val, len(val_loader.dataset), val_acc))
 
             # write into the tensorboard
-            if args.tensorboard:
-                writer.add_scalar("Loss/val", val_loss, epoch)
-                writer.add_scalar("Reconstruction/val", val_rec, epoch)
-                writer.add_scalar("KL/val", val_kl, epoch)
-                writer.add_scalar("CE/val", val_ce, epoch)
-                writer.add_scalar("Accuracy/val", val_acc, epoch)
+            # if args.tensorboard:
+            writer.add_scalar("Loss/val", val_loss, epoch)
+            writer.add_scalar("Reconstruction/val", val_rec, epoch)
+            writer.add_scalar("KL/val", val_kl, epoch)
+            writer.add_scalar("CE/val", val_ce, epoch)
+            writer.add_scalar("Accuracy/val", val_acc, epoch)
+            # if args.contrastive_loss:
+            #     writer.add_scalar("Contrastive/val", contra_loss.data / len(data), epoch)
+            if args.mmd_loss: 
+                writer.add_scalar("MMD/val", lvae.invar_loss.data/len(data_val), epoch)
+            if args.supcon_loss: 
+                writer.add_scalar("SupCon/val", lvae.supcon_loss.data/len(data_val), epoch)
 
 
             ## if val best
@@ -386,8 +397,8 @@ if __name__ == '__main__':
         args.num_classes = 4
         in_channel = 3
     elif args.dataset == "TinyImageNet":
-        load_dataset = TinyImageNet_Dataset(args.dataset)
         args.num_classes = 20
+        load_dataset = TinyImageNet_Dataset(args.num_classes)
         in_channel = 3
     elif args.dataset == "CIFAR100":
         load_dataset = CIFAR100_Dataset(args.dataset)
@@ -396,8 +407,10 @@ if __name__ == '__main__':
     elif args.dataset == "CIFARAddN":
         load_dataset = CIFARAddN_Dataset(args.dataset, args.unseen_num)
         args.num_classes = 4
-        in_channel = 3
 
+
+    if args.debug: 
+        args.epochs=1
 
     args.exp  = args.exp - 1
     exp_name = get_exp_name(args) # lamda100-...
@@ -437,7 +450,7 @@ if __name__ == '__main__':
                     flat_dim32=32, flat_dim16=16, flat_dim8=8, flat_dim4=4, flat_dim2=2, flat_dim1=1,
                     latent_dim512=512, latent_dim256=256, latent_dim128=128, latent_dim64=64, latent_dim32=latent_dim,
                     num_class=args.num_classes, dataset=args.dataset, args=args)
-
+        
         use_cuda = torch.cuda.is_available() and True
         device = torch.device("cuda" if use_cuda else "cpu")
 
@@ -469,29 +482,27 @@ if __name__ == '__main__':
             args.beta_anneal = DeterministicWarmup(n=args.beta_anneal, t_max=args.beta_z)
         lvae.supcon_critic = SupConLoss(args.con_temperature)
 
+        log_dir = "runs/%s" % (exp_name)
+        writer = SummaryWriter(log_dir)
+        config_md = get_hparam_table(config)
+        writer.add_text('Config', config_md)
 
         if args.eval:
             # load train model
-            states = torch.load(os.path.join(args.save_path, 'model.pkl'), map_location=args.device)
+            if args.dataset == "CIFARAddN":
+                model_path = args.save_path[:16] + str(10) + args.save_path[18:]
+            else:
+                model_path =  args.save_path
+
+            states = torch.load(os.path.join(model_path, 'model.pkl'), map_location=args.device)
             lvae.load_state_dict(states['model'])
 
-            if args.get_plots: 
-                plot_loader = DataLoader(train_dataset, batch_size=5, shuffle=True, drop_last=False, num_workers=1, pin_memory=True)
-                # plot_rec(lvae, plot_loader, args.transforms, args)
-
-                # point_cloud(model, dataset)
-
-            
-            ocr_test(args, lvae, train_loader, test_loader_seen, test_loader_unseen)
+            if args.dataset == "CIFARAddN":
+                get_test_feas(lvae, test_loader_seen, test_loader_unseen, args)
+                        
+            ocr_test(args, lvae, train_loader, test_loader_seen, test_loader_unseen, writer)
 
         else:
-            # Prepare summary writer
-            if args.tensorboard:
-                log_dir = "runs/%s" % (exp_name)
-                writer = SummaryWriter(log_dir)
-                config_md = get_hparam_table(config)
-                writer.add_text('Config', config_md)
-
             best_val_loss, best_val_epoch = train(args, lvae)
             print('Finally!Best Epoch: {},  Best Val Loss: {:.4f}'.format(best_val_epoch, best_val_loss))
 
@@ -501,4 +512,4 @@ if __name__ == '__main__':
                 lvae.load_state_dict(states['model'])
 
             # perform test
-            ocr_test(args, lvae, train_loader, test_loader_seen, test_loader_unseen)
+            ocr_test(args, lvae, train_loader, test_loader_seen, test_loader_unseen, writer)

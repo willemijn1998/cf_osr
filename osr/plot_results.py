@@ -24,10 +24,9 @@ from dataloader import MNIST_Dataset, CIFAR10_Dataset, SVHN_Dataset, CIFARAdd10_
 from model import LVAE, SupConLoss
 from model2 import LVAE2
 from qmv import ocr_test
-from get_plots import *
+# from utils_plot import get_tsne, scatter_plot, point_cloud, rec_histogram, get_sample_feas, get_class_means
+from utils_plot import * 
 
-
-# os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 
 def get_args():
     parser = argparse.ArgumentParser(description='PyTorch OSR Example')
@@ -56,13 +55,14 @@ def get_args():
     parser.add_argument('--dataset', type=str, default="MNIST", help='The dataset going to use')
     parser.add_argument('--eval', action="store_true", default=False, help='directly eval?')
     parser.add_argument('--baseline', action="store_true", default=False, help='If is the bseline?')
-    parser.add_argument('--usebb_model', action="store_true", default=False, help='If use model to get the train feature')
+    parser.add_argument('--use_model', action="store_true", default=False, help='If use model to get the train feature')
     parser.add_argument('--encode_z', type=int, default=None, help='If encode z and dim of z')
     parser.add_argument("--contrastive_loss", type=int, default=0, help="Use contrastive loss")
     parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for contrastive loss")
     parser.add_argument("--contra_lambda", type=float, default=1.0, help="Scaling factor of contrastive loss")
+    parser.add_argument("--rec_lamda", type=float, default=1.0, help="Scaling factor of reconstruction loss")
     parser.add_argument("--save_epoch", type=int, default=None, help="save model in this epoch")
-    parser.add_argument("--exp", type=int, default=0, help="which experiment")
+    parser.add_argument("--exp", type=int, default=1, help="which experiment")
     parser.add_argument("--unseen_num", type=int, default=13, help="unseen class num in CIFAR100")
         # mmd params
     parser.add_argument("--mmd_loss", type=int, default=0, help='Use MMD loss?')
@@ -76,16 +76,26 @@ def get_args():
     parser.add_argument('--con_temperature', type=float, default=0.07, help='Temperature for supcon loss')
     parser.add_argument('--theta', type=float, default=0.2, help='Weight for supcon loss')
 
-
     # test
     parser.add_argument('--cf', action="store_true", default=False, help='use counterfactual generation')
     parser.add_argument('--cf_threshold', action="store_true", default=False, help='use counterfactual threshold in revise_cf')
     parser.add_argument('--yh', action="store_true", default=False, help='use yh rather than feature_y_mean')
     parser.add_argument('--use_model_gau', action="store_true", default=False, help='use feature by model in gau')
     parser.add_argument('--correct_split', action='store_true', default=False, help='Use the correct test-val split?')
-    parser.add_argument('--rm_skips', action='store_true', default=False, help='Remove skip connections? ')
+    parser.add_argument('--rm_skips', type=int, default=0, help='Remove skip connections? ')
     parser.add_argument('--no_aug', type=int, default=0, help="No augmentation for losses?")
-    parser.add_argument('--get_plots', action= 'store_true', default=False, help='Plot images?')
+
+    #plots
+    parser.add_argument('--scatter', action= 'store_true', default=False, help='Generate scatter image?')
+    parser.add_argument('--pointcloud', action= 'store_true', default=False, help='Pointcloud plot?')
+    parser.add_argument('--rec_histo', action= 'store_true', default=False, help='Histogram of Reconstruction errors?')    
+    parser.add_argument('--sample_scatter', action= 'store_true', default=False, help='Scatter plot of sample feas?')
+    parser.add_argument('--ll_hist', action= 'store_true', default=False, help='Loglikelihood hist of class feats? ')
+    parser.add_argument('--ll_hist_1c', action= 'store_true', default=False, help='Loglikelihood hist of one class feats? ')
+    parser.add_argument('--scatter_layers', action= 'store_true', default=False, help='scatter plots of layers? ')
+    parser.add_argument('--reconstruct', action= 'store_true', default=False, help='Show reconstructed imgs?')
+
+
 
     args = parser.parse_args()
     return args
@@ -98,23 +108,6 @@ def control_seed(args):
         torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
     torch.backends.cudnn.deterministic = True
-
-
-class DeterministicWarmup(object):
-    def __init__(self, n=100, t_max=1):
-        self.t = 0
-        self.t_max = t_max
-        self.inc = 1 / n
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        t = self.t + self.inc
-
-        self.t = self.t_max if t > self.t_max else t  # 0->1
-        return self.t
-
 
 if __name__ == '__main__':
 
@@ -173,26 +166,12 @@ if __name__ == '__main__':
         save_path = 'results/%s' %(exp_name)
         args.save_path = save_path
         if not os.path.exists(save_path):
+
             os.makedirs(save_path)
 
         latent_dim = 32
         if args.encode_z:
             latent_dim += args.encode_z
-
-        if not args.rm_skips: 
-            lvae = LVAE(in_ch=in_channel,
-                    out_ch64=64, out_ch128=128, out_ch256=256, out_ch512=512,
-                    kernel1=1, kernel2=2, kernel3=3, padding0=0, padding1=1, stride1=1, stride2=2,
-                    flat_dim32=32, flat_dim16=16, flat_dim8=8, flat_dim4=4, flat_dim2=2, flat_dim1=1,
-                    latent_dim512=512, latent_dim256=256, latent_dim128=128, latent_dim64=64, latent_dim32=latent_dim,
-                    num_class=args.num_classes, dataset=args.dataset, args=args)
-        else: 
-            lvae = LVAE2(in_ch=in_channel,
-                    out_ch64=64, out_ch128=128, out_ch256=256, out_ch512=512,
-                    kernel1=1, kernel2=2, kernel3=3, padding0=0, padding1=1, stride1=1, stride2=2,
-                    flat_dim32=32, flat_dim16=16, flat_dim8=8, flat_dim4=4, flat_dim2=2, flat_dim1=1,
-                    latent_dim512=512, latent_dim256=256, latent_dim128=128, latent_dim64=64, latent_dim32=latent_dim,
-                    num_class=args.num_classes, dataset=args.dataset, args=args)
 
         use_cuda = torch.cuda.is_available() and True
         device = torch.device("cuda" if use_cuda else "cpu")
@@ -202,38 +181,143 @@ if __name__ == '__main__':
 
         if args.correct_split: 
             testdata_seen, testdata_unseen = test_dataset 
-            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False, num_workers=1, pin_memory=True)
-            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=1, pin_memory=True)
-            test_loader_seen = DataLoader(testdata_seen, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=1, pin_memory=True)
-            test_loader_unseen = DataLoader(testdata_unseen, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=1, pin_memory=True)
         else: 
-            train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=1)
-            val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=1)
-            test_loader_seen = val_loader 
-            test_loader_unseen = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=1)
+            testdata_seen = val_dataset 
 
-        # Model
-        lvae.to(args.device)
-        nllloss = nn.NLLLoss().to(device)
+        if args.scatter: 
+            # Scatter plot of the content features 
+            train_feas = np.loadtxt((save_path + "/train_fea.txt"))
+            train_tars = np.loadtxt((save_path + "/train_tar.txt"))            
+            plot_name = exp_name[:-2] + exp_name[-1]
+            feas = np.loadtxt((save_path + "/test_fea.txt"))
+            targets = np.loadtxt((save_path + "/test_tar.txt"))
 
-        # optimzer
-        optimizer = optim.SGD(lvae.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.wd)
-        decreasing_lr = list(map(int, args.decreasing_lr.split(',')))
-        print('decreasing_lr: ' + str(decreasing_lr))
-        beta = DeterministicWarmup(n=50, t_max=1)  # Linear warm-up from 0 to 1 over 50 epoch
-        if args.beta_anneal != 0:
-            args.beta_anneal = DeterministicWarmup(n=args.beta_anneal, t_max=args.beta_z)
-        lvae.supcon_critic = SupConLoss(args.con_temperature)
+            means= get_class_means(train_feas, train_tars, args.num_classes)
+
+            feas = np.vstack([feas, means])
+            projections = get_tsne(feas, 2)
+
+            means = projections[-args.num_classes:,:]
+            projections = projections[:-args.num_classes,:]
+            scatter_plot(projections, targets, plot_name, means)
+
+        if args.pointcloud: 
+            # Point cloud of the content features 
+            plot_name = exp_name[:-2] + exp_name[-1]
+            feas = np.loadtxt((save_path + "/test_fea.txt"))
+            targets = np.loadtxt((save_path + "/test_tar.txt"))           
+            projections = get_tsne(feas, 3)
+            point_cloud(projections, targets, plot_name)
+        
+        if args.rec_histo: 
+            # Histogram of the reconstruction losses 
+            rec_path = args.save_path + "/test_rec.txt"
+            recs = np.loadtxt(rec_path)
+            tar_path = args.save_path + "/test_tar.txt"
+            tars= np.loadtxt(tar_path)
+            rec_histogram(recs, tars, args.num_classes, args.exp_name)
+
+        if args.sample_scatter: 
+            # Scatter plot of the sample/ style features 
+            lvae = LVAE(in_ch=in_channel,
+                    out_ch64=64, out_ch128=128, out_ch256=256, out_ch512=512,
+                    kernel1=1, kernel2=2, kernel3=3, padding0=0, padding1=1, stride1=1, stride2=2,
+                    flat_dim32=32, flat_dim16=16, flat_dim8=8, flat_dim4=4, flat_dim2=2, flat_dim1=1,
+                    latent_dim512=512, latent_dim256=256, latent_dim128=128, latent_dim64=64, latent_dim32=latent_dim,
+                    num_class=args.num_classes, dataset=args.dataset, args=args)
+            states = torch.load(os.path.join(args.save_path, 'model.pkl'), map_location=args.device)
+            lvae.load_state_dict(states['model'])
+            
+            test_loader_seen = DataLoader(testdata_seen, batch_size=args.batch_size, shuffle=False, drop_last=False)
+            test_loader_unseen = DataLoader(testdata_unseen, batch_size=args.batch_size, shuffle=False, drop_last=False)
+            sample_feas, sample_tars = get_sample_feas(test_loader_seen, test_loader_unseen, lvae, args)
+            projections = get_tsne(sample_feas, 2)
+            plot_name = exp_name[:-2] + exp_name[-1] + "_sample"
+            scatter_plot(projections, sample_tars, plot_name)
+
+    
+        if args.ll_hist: 
+            # Histogram of max-loglikelihoods for knowns and unknowns 
+            testfea = np.loadtxt((args.save_path + "/test_fea.txt"))
+            testtar = np.loadtxt((args.save_path + "/test_tar.txt"))     
+            mu, sigma = get_mu_sigma(testtar, testfea, args.num_classes)
+            ll_known, ll_unknown = ll_histogram(testtar, testfea, args.num_classes, mu, sigma)
+            b1 = np.max(ll_known)
+            bins = np.linspace(0, int(b1), 100)
+
+            plt.hist(ll_known, bins, alpha=0.5, label='seen')
+            plt.hist(ll_unknown, bins, alpha=0.5, label='unseen')
+            plt.legend()
+            plt.title(exp_name)
+            plot_path = exp_name[:-2] + exp_name[-1]
+            plt.savefig('images/ll_hist/%s.png' %(plot_path))
+            plt.show()
 
 
-            # load train model
-        states = torch.load(os.path.join(args.save_path, 'model.pkl'), map_location=args.device)
-        lvae.load_state_dict(states['model'])
+        if args.ll_hist_1c: 
+            # Histogram of the loglikelihoods per class knowns vs unknowns 
+            testfea = np.loadtxt((args.save_path + "/test_fea.txt"))
+            testtar = np.loadtxt((args.save_path + "/test_tar.txt"))     
+            mu, sigma = get_mu_sigma(testtar, testfea, args.num_classes)
 
-        plot_loader = DataLoader(train_dataset, batch_size=5, shuffle=True, drop_last=False, num_workers=1, pin_memory=True)
-        plot_rec(lvae, plot_loader, args.transforms, args, mean=load_dataset.mean, std=load_dataset.std)
 
-        point_cloud(lvae, dataset)
+        if args.scatter_layers: 
+            # Scatter plot of all L latent features in hierarchy. 
+            lvae = LVAE(in_ch=in_channel,
+                    out_ch64=64, out_ch128=128, out_ch256=256, out_ch512=512,
+                    kernel1=1, kernel2=2, kernel3=3, padding0=0, padding1=1, stride1=1, stride2=2,
+                    flat_dim32=32, flat_dim16=16, flat_dim8=8, flat_dim4=4, flat_dim2=2, flat_dim1=1,
+                    latent_dim512=512, latent_dim256=256, latent_dim128=128, latent_dim64=64, latent_dim32=latent_dim,
+                    num_class=args.num_classes, dataset=args.dataset, args=args)
+            states = torch.load(os.path.join(args.save_path, 'model.pkl'), map_location=args.device)
+            lvae.load_state_dict(states['model'])
+            lvea=lvae.to(args.device)
+            
+            test_loader_seen = DataLoader(testdata_seen, batch_size=args.batch_size, shuffle=False, drop_last=False)
+            test_loader_unseen = DataLoader(testdata_unseen, batch_size=args.batch_size, shuffle=False, drop_last=False)
+
+            targets, hier_feas = get_hierarchy_feas(test_loader_seen, test_loader_unseen, lvae, args)
+
+            fig, axs = plt.subplots(2,5, figsize=(15, 6), facecolor='w', edgecolor='k')
+            fig.subpots_adjust(hspace=.5, wspace=.001) 
+            axs = axs.ravel()
+
+            for i in range(10): 
+                projections = get_tsne(hier_feas[i], 2)
+                axs[i].scatter(projections, targets)
+                axs[i].set_title("L=%s"%i)
+            
+            fig.savefig('images/scatter_layers1.png')
 
         
-        ocr_test(args, lvae, train_loader, test_loader_seen, test_loader_unseen)
+        if args.reconstruct: 
+            lvae = LVAE(in_ch=in_channel,
+                    out_ch64=64, out_ch128=128, out_ch256=256, out_ch512=512,
+                    kernel1=1, kernel2=2, kernel3=3, padding0=0, padding1=1, stride1=1, stride2=2,
+                    flat_dim32=32, flat_dim16=16, flat_dim8=8, flat_dim4=4, flat_dim2=2, flat_dim1=1,
+                    latent_dim512=512, latent_dim256=256, latent_dim128=128, latent_dim64=64, latent_dim32=latent_dim,
+                    num_class=args.num_classes, dataset=args.dataset, args=args)
+            states = torch.load(os.path.join(args.save_path, 'model.pkl'), map_location=args.device)
+            lvae.load_state_dict(states['model'])
+            lvea=lvae.to(args.device)
+            
+            test_loader_seen = DataLoader(testdata_seen, batch_size=5, shuffle=False, drop_last=False)
+            test_loader_unseen = DataLoader(testdata_unseen, batch_size=5, shuffle=False, drop_last=False)
+
+            show_recon(test_loader_seen, lvae, args)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            

@@ -147,8 +147,11 @@ class GAU(object):
                 #Unseen
                 prediction = labelnum
             else:
+                if args.use_ll: 
+                    prediction = torch.argmax(delta)
+                else: 
                 #Seen
-                prediction = testpre[i]
+                    prediction = testpre[i]
 
             result.append(prediction)
 
@@ -198,6 +201,15 @@ def get_mean_y(train_feature, train_target):
     return feature_mean_y
 
 def ocr_test(args, lvae, train_loader, test_loader_seen, test_loader_unseen, writer):
+    if args.use_ll: 
+        gau = GAU(args)
+        test_sample = ['%s/test_fea.txt' % args.save_path, '%s/test_tar.txt' % args.save_path,
+           '%s/test_pre_after.txt' % args.save_path]
+
+        perf_test = gau.test(test_sample, args)
+
+
+    
     if not args.use_model:
         revise(args)
         gau = GAU(args)

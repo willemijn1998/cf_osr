@@ -5,6 +5,8 @@ from torch.autograd import Variable
 from torch import autograd, nn, optim
 from torch.nn import functional as F
 
+# Model that classifies according to loglikelihood 
+
 reconstruction_function = nn.MSELoss()
 reconstruction_function.size_average = False
 nllloss = nn.NLLLoss()
@@ -502,6 +504,23 @@ class LVAE(nn.Module):
 
         return y_latent_mu, predict_test, x_re
 
+
+    def test(self, x, y_de, args):
+        _, mu_latent, _, \
+        _, _, _, _, _, _, _, _, _, _,\
+        _, _, _, _, _, _, _, _, \
+        _, predict_test, _ ,\
+        x_re, \
+        pmu5_1, pvar5_1, pmu4_2, pvar4_2, pmu4_1, pvar4_1, pmu3_2, pvar3_2, pmu3_1, pvar3_1, \
+        pmu2_2, pvar2_2, pmu2_1, pvar2_1, pmu1_2, pvar1_2, pmu1_1, pvar1_1 = self.lnet(x, y_de, args)
+
+        if args.encode_z:
+            z_latent_mu, y_latent_mu = mu_latent.split([args.encode_z, 32], dim=1)
+        else:
+            y_latent_mu = mu_latent
+
+        return y_latent_mu, predict_test, x_re
+
     def get_yh(self, y_de):
         yh = self.one_hot(y_de)
         return yh
@@ -739,119 +758,6 @@ class LVAE(nn.Module):
         x_re = self.TCONV1_1.final_decode(de_latent1_1)
 
         return x_re.view(bs, class_num, *x.size()[1:])
-
-    def latent_hierarchy(self, x, y_de, args):
-
-        enc1_1, mu_up1_1, var_up1_1 = self.CONV1_1.encode(x)
-        enc1_2, mu_up1_2, var_up1_2 = self.CONV1_2.encode(enc1_1)
-
-        enc2_1, mu_up2_1, var_up2_1 = self.CONV2_1.encode(enc1_2)
-        enc2_2, mu_up2_2, var_up2_2 = self.CONV2_2.encode(enc2_1)
-
-        enc3_1, mu_up3_1, var_up3_1 = self.CONV3_1.encode(enc2_2)
-        enc3_2, mu_up3_2, var_up3_2 = self.CONV3_2.encode(enc3_1)
-
-        enc4_1, mu_up4_1, var_up4_1 = self.CONV4_1.encode(enc3_2)
-        enc4_2, mu_up4_2, var_up4_2 = self.CONV4_2.encode(enc4_1)
-
-        enc5_1, mu_up5_1, var_up5_1 = self.CONV5_1.encode(enc4_2)
-        enc5_2, mu_latent, var_latent = self.CONV5_2.encode(enc5_1)
-
-        # enc5_2.shape = (64, 512, 1, 1)
-        # mu, var.shape =(64, 42)
-
-        # split z and y
-        if args.encode_z:
-            z_latent_mu, y_latent_mu = mu_latent.split([args.encode_z, 32], dim=1)
-            z_latent_var, y_latent_var = var_latent.split([args.encode_z, 32], dim=1)
-            latent = ut.sample_gaussian(mu_latent, var_latent, args.device)
-            latent_y = ut.sample_gaussian(y_latent_mu, y_latent_var, args.device)
-        else:
-            y_latent_mu = mu_latent
-            y_latent_var = var_latent
-            latent = ut.sample_gaussian(mu_latent, var_latent, args.device)
-            latent_y = latent
-
-
-        predict = F.log_softmax(self.classifier(latent_y), dim=1)
-        predict_test = F.log_softmax(self.classifier(y_latent_mu), dim=1)
-        yh = self.one_hot(y_de)
-
-        # partially downwards
-        dec5_1, mu_dn5_1, var_dn5_1 = self.TCONV5_2.decode(latent) # 64, 42
-        # (512, 2, 2)
-        prec_up5_1 = var_up5_1 ** (-1)
-        prec_dn5_1 = var_dn5_1 ** (-1)
-        qmu5_1 = (mu_up5_1 * prec_up5_1 + mu_dn5_1 * prec_dn5_1) / (prec_up5_1 + prec_dn5_1)
-        qvar5_1 = (prec_up5_1 + prec_dn5_1) ** (-1)
-        de_latent5_1 = ut.sample_gaussian(qmu5_1, qvar5_1, args.device)
-
-        dec4_2, mu_dn4_2, var_dn4_2 = self.TCONV5_1.decode(de_latent5_1) # 
-        # 512, 2, 2
-        prec_up4_2 = var_up4_2 ** (-1)
-        prec_dn4_2 = var_dn4_2 ** (-1)
-        qmu4_2 = (mu_up4_2 * prec_up4_2 + mu_dn4_2 * prec_dn4_2) / (prec_up4_2 + prec_dn4_2)
-        qvar4_2 = (prec_up4_2 + prec_dn4_2) ** (-1)
-        de_latent4_2 = ut.sample_gaussian(qmu4_2, qvar4_2, args.device)
-
-        dec4_1, mu_dn4_1, var_dn4_1 = self.TCONV4_2.decode(de_latent4_2)
-        # 512, 4, 4 
-        prec_up4_1 = var_up4_1 ** (-1)
-        prec_dn4_1 = var_dn4_1 ** (-1)
-        qmu4_1 = (mu_up4_1 * prec_up4_1 + mu_dn4_1 * prec_dn4_1) / (prec_up4_1 + prec_dn4_1)
-        qvar4_1 = (prec_up4_1 + prec_dn4_1) ** (-1)
-        de_latent4_1 = ut.sample_gaussian(qmu4_1, qvar4_1, args.device)
-
-        dec3_2, mu_dn3_2, var_dn3_2 = self.TCONV4_1.decode(de_latent4_1)
-        # 256, 4, 4
-        prec_up3_2 = var_up3_2 ** (-1)
-        prec_dn3_2 = var_dn3_2 ** (-1)
-        qmu3_2 = (mu_up3_2 * prec_up3_2 + mu_dn3_2 * prec_dn3_2) / (prec_up3_2 + prec_dn3_2)
-        qvar3_2 = (prec_up3_2 + prec_dn3_2) ** (-1)
-        de_latent3_2 = ut.sample_gaussian(qmu3_2, qvar3_2, args.device)
-
-        dec3_1, mu_dn3_1, var_dn3_1 = self.TCONV3_2.decode(de_latent3_2)
-        # 256, 8, 8
-        prec_up3_1 = var_up3_1 ** (-1)
-        prec_dn3_1 = var_dn3_1 ** (-1)
-        qmu3_1 = (mu_up3_1 * prec_up3_1 + mu_dn3_1 * prec_dn3_1) / (prec_up3_1 + prec_dn3_1)
-        qvar3_1 = (prec_up3_1 + prec_dn3_1) ** (-1)
-        de_latent3_1 = ut.sample_gaussian(qmu3_1, qvar3_1, args.device)
-
-        dec2_2, mu_dn2_2, var_dn2_2 = self.TCONV3_1.decode(de_latent3_1)
-        # 128, 8, 8
-        prec_up2_2 = var_up2_2 ** (-1)
-        prec_dn2_2 = var_dn2_2 ** (-1)
-        qmu2_2 = (mu_up2_2 * prec_up2_2 + mu_dn2_2 * prec_dn2_2) / (prec_up2_2 + prec_dn2_2)
-        qvar2_2 = (prec_up2_2 + prec_dn2_2) ** (-1)
-        de_latent2_2 = ut.sample_gaussian(qmu2_2, qvar2_2, args.device)
-
-        dec2_1, mu_dn2_1, var_dn2_1 = self.TCONV2_2.decode(de_latent2_2)
-        # 128, 16, 16 
-        prec_up2_1 = var_up2_1 ** (-1)
-        prec_dn2_1 = var_dn2_1 ** (-1)
-        qmu2_1 = (mu_up2_1 * prec_up2_1 + mu_dn2_1 * prec_dn2_1) / (prec_up2_1 + prec_dn2_1)
-        qvar2_1 = (prec_up2_1 + prec_dn2_1) ** (-1)
-        de_latent2_1 = ut.sample_gaussian(qmu2_1, qvar2_1, args.device)
-
-        dec1_2, mu_dn1_2, var_dn1_2 = self.TCONV2_1.decode(de_latent2_1)
-        # 64, 16, 16 
-        prec_up1_2 = var_up1_2 ** (-1)
-        prec_dn1_2 = var_dn1_2 ** (-1)
-        qmu1_2 = (mu_up1_2 * prec_up1_2 + mu_dn1_2 * prec_dn1_2) / (prec_up1_2 + prec_dn1_2)
-        qvar1_2 = (prec_up1_2 + prec_dn1_2) ** (-1)
-        de_latent1_2 = ut.sample_gaussian(qmu1_2, qvar1_2, args.device)
-
-        dec1_1, mu_dn1_1, var_dn1_1 = self.TCONV1_2.decode(de_latent1_2)
-        # 64, 32, 32
-        prec_up1_1 = var_up1_1 ** (-1)
-        prec_dn1_1 = var_dn1_1 ** (-1)
-        qmu1_1 = (mu_up1_1 * prec_up1_1 + mu_dn1_1 * prec_dn1_1) / (prec_up1_1 + prec_dn1_1)
-        qvar1_1 = (prec_up1_1 + prec_dn1_1) ** (-1)
-        de_latent1_1 = ut.sample_gaussian(qmu1_1, qvar1_1, args.device)
-
-        return  de_latent1_1, de_latent1_2, de_latent2_1, de_latent2_2,  de_latent3_1, de_latent3_2, \
-                de_latent4_1, de_latent4_2, de_latent5_1, latent 
 
 
 
