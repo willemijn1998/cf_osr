@@ -88,6 +88,7 @@ def get_args():
     parser.add_argument('--rm_skips', type=int, default=0, help='Remove skip connections? ')
     parser.add_argument('--no_aug', type=int, default=0, help="No augmentation for losses?")
     parser.add_argument('--get_plots', action= 'store_true', default=False, help='Plot images?')
+    parser.add_argument('--use_likelihood', action='store_true', default=False, help='Use likelihood distribution for eval?')
 
     args = parser.parse_args()
     return args
@@ -416,7 +417,7 @@ if __name__ == '__main__':
     exp_name = get_exp_name(args) # lamda100-...
     args.exp_name = exp_name
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")    
-    args.transforms = get_transforms(args.s_jitter, args.p_grayscale)
+    args.transforms = get_transforms(args.s_jitter, args.p_grayscale, args.dataset)
     config = vars(args)
 
     print("Experiment: {} \n with hyperparameters: {}".format(exp_name,config))
@@ -425,7 +426,10 @@ if __name__ == '__main__':
     for run_idx in range(args.exp, args.exp+1):
         print("Begin to Run Exp %s..." %run_idx)
         args.run_idx = run_idx
-        seed_sampler = int(args.seed_sampler.split(' ')[run_idx])
+        seed_list = args.seed_sampler.split(' ')
+        seed_list += list(range(0,20)) 
+        seed_list += [21]
+        seed_sampler = int(seed_list[run_idx])
         # seed_sampler = None
         save_path = 'results/%s' %(exp_name)
         args.save_path = save_path

@@ -148,10 +148,12 @@ class GAU(object):
                 prediction = labelnum
             else:
                 if args.use_ll: 
-                    prediction = torch.argmax(delta)
+                    prediction = np.argmax(delta)
                 else: 
                 #Seen
                     prediction = testpre[i]
+
+            print(prediction, testtar[i])
 
             result.append(prediction)
 

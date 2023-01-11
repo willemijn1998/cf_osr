@@ -26,6 +26,14 @@ from model2 import LVAE2
 from qmv import ocr_test
 # from utils_plot import get_tsne, scatter_plot, point_cloud, rec_histogram, get_sample_feas, get_class_means
 from utils_plot import * 
+import json 
+from sklearn.feature_selection import mutual_info_classif
+
+
+# CIFARAdd10: python plot_results.py --dataset CIFARAdd10 --exp 2 --eta 3 --scatter --mmd_loss 1 --encode_z 10
+# CIFAR10: python plot_results.py --dataset CIFAR10 --exp 2 --supcon_loss 1 --theta 0.2 --encode_z 10 --reconstruct --contrastive_loss 1 --beta_z 6
+# SVHN: 
+# 
 
 
 def get_args():
@@ -33,7 +41,7 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=64, help='input batch size for training (default: 64)')
     parser.add_argument('--num_classes', type=int, default=10, help='number of classes')
     parser.add_argument('--epochs', type=int, default=50, help='number of epochs to train (default: 50)')
-    parser.add_argument('--lr', type=float, default=0.001, help='learning rate (default: 1e-3)')
+    parser.add_argument('--lr', type=float, default=0.0005, help='learning rate (default: 1e-3)')
     parser.add_argument('--wd', type=float, default=0.00, help='weight decay')
     parser.add_argument('--momentum', type=float, default=0.01, help='momentum (default: 1e-3)')
     parser.add_argument('--decreasing_lr', default='60,100,150', help='decreasing strategy')
@@ -69,7 +77,7 @@ def get_args():
     parser.add_argument('--s_jitter', type=float, default=0.5, help='Strength for color jitter')
     parser.add_argument('--p_grayscale', type=float, default=0.3, help='Probability of random grayscale')
     parser.add_argument('--gamma', type=float, default=1.0, help='Weight for kernel MMD loss')
-    parser.add_argument('--eta', type=int, default=1, help='Weight for mmd loss')
+    parser.add_argument('--eta', type=float, default=1.0, help='Weight for mmd loss')
     parser.add_argument('--kernel', type=str, default='multiscale', help='Which kernel to use for MMD loss')    
         # supcon params
     parser.add_argument('--supcon_loss', type=int, default=0, help='Use supcon loss? ')
@@ -81,7 +89,7 @@ def get_args():
     parser.add_argument('--cf_threshold', action="store_true", default=False, help='use counterfactual threshold in revise_cf')
     parser.add_argument('--yh', action="store_true", default=False, help='use yh rather than feature_y_mean')
     parser.add_argument('--use_model_gau', action="store_true", default=False, help='use feature by model in gau')
-    parser.add_argument('--correct_split', action='store_true', default=False, help='Use the correct test-val split?')
+    parser.add_argument('--correct_split', action='store_true', default=True, help='Use the correct test-val split?')
     parser.add_argument('--rm_skips', type=int, default=0, help='Remove skip connections? ')
     parser.add_argument('--no_aug', type=int, default=0, help="No augmentation for losses?")
 
@@ -94,7 +102,8 @@ def get_args():
     parser.add_argument('--ll_hist_1c', action= 'store_true', default=False, help='Loglikelihood hist of one class feats? ')
     parser.add_argument('--scatter_layers', action= 'store_true', default=False, help='scatter plots of layers? ')
     parser.add_argument('--reconstruct', action= 'store_true', default=False, help='Show reconstructed imgs?')
-
+    parser.add_argument('--from_file', action= 'store_true', default=False, help='scatter layers from file?')
+    parser.add_argument('--mutual_info', action= 'store_true', default=False, help='calculate mutual information?')
 
 
     args = parser.parse_args()
@@ -152,7 +161,7 @@ if __name__ == '__main__':
     exp_name = get_exp_name(args) # lamda100-...
     args.exp_name = exp_name
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")    
-    args.transforms = get_transforms(args.s_jitter, args.p_grayscale)
+    args.transforms = get_transforms(args.s_jitter, args.p_grayscale, args.dataset)
     config = vars(args)
 
     print("Experiment: {} \n with hyperparameters: {}".format(exp_name,config))
@@ -161,7 +170,11 @@ if __name__ == '__main__':
     for run_idx in range(args.exp, args.exp+1):
         print("Begin to Run Exp %s..." %run_idx)
         args.run_idx = run_idx
-        seed_sampler = int(args.seed_sampler.split(' ')[run_idx])
+        seed_list = args.seed_sampler.split(' ')
+        seed_list += list(range(0,20)) 
+        seed_list += [21]
+        seed_sampler = int(seed_list[run_idx])
+        # seed_sampler = int(args.seed_sampler.split(' ')[run_idx])
         # seed_sampler = None
         save_path = 'results/%s' %(exp_name)
         args.save_path = save_path
@@ -229,13 +242,41 @@ if __name__ == '__main__':
             lvae.load_state_dict(states['model'])
             
             test_loader_seen = DataLoader(testdata_seen, batch_size=args.batch_size, shuffle=False, drop_last=False)
-            test_loader_unseen = DataLoader(testdata_unseen, batch_size=args.batch_size, shuffle=False, drop_last=False)
+            test_loader_unseen = DataLoader(testdata_unseen, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=1)
             sample_feas, sample_tars = get_sample_feas(test_loader_seen, test_loader_unseen, lvae, args)
             projections = get_tsne(sample_feas, 2)
             plot_name = exp_name[:-2] + exp_name[-1] + "_sample"
             scatter_plot(projections, sample_tars, plot_name)
 
-    
+        if args.mutual_info: 
+            lvae = LVAE(in_ch=in_channel,
+                    out_ch64=64, out_ch128=128, out_ch256=256, out_ch512=512,
+                    kernel1=1, kernel2=2, kernel3=3, padding0=0, padding1=1, stride1=1, stride2=2,
+                    flat_dim32=32, flat_dim16=16, flat_dim8=8, flat_dim4=4, flat_dim2=2, flat_dim1=1,
+                    latent_dim512=512, latent_dim256=256, latent_dim128=128, latent_dim64=64, latent_dim32=latent_dim,
+                    num_class=args.num_classes, dataset=args.dataset, args=args)
+            states = torch.load(os.path.join(args.save_path, 'model.pkl'), map_location=args.device)
+            lvae.load_state_dict(states['model'])
+            
+            test_loader_seen = DataLoader(testdata_seen, batch_size=args.batch_size, shuffle=False, drop_last=False)
+            test_loader_unseen = DataLoader(testdata_unseen, batch_size=args.batch_size, shuffle=False, drop_last=False)
+            sample_feas, sample_tars = get_sample_feas(test_loader_seen, test_loader_unseen, lvae, args)
+            
+            mi_style = mutual_info_classif(sample_feas.cpu(), sample_tars.cpu())
+
+            feas = np.loadtxt((save_path + "/test_fea.txt"))
+            targets = np.loadtxt((save_path + "/test_tar.txt"))      
+
+            mi_content = mutual_info_classif(feas, targets)
+
+            print_str = '%s \n Style MI: %s, av %s \n Content MI: %s, av: %s'%(args.exp_name, mi_style, np.mean(mi_style), mi_content, np.mean(mi_content))
+
+            print(print_str)
+
+            with open('results/mutual_info.txt', 'a') as f: 
+                f.write(print_str)
+
+
         if args.ll_hist: 
             # Histogram of max-loglikelihoods for knowns and unknowns 
             testfea = np.loadtxt((args.save_path + "/test_fea.txt"))
@@ -277,16 +318,49 @@ if __name__ == '__main__':
             test_loader_unseen = DataLoader(testdata_unseen, batch_size=args.batch_size, shuffle=False, drop_last=False)
 
             targets, hier_feas = get_hierarchy_feas(test_loader_seen, test_loader_unseen, lvae, args)
+            
+            file_name = args.exp_name.replace('/', '-')
 
-            fig, axs = plt.subplots(2,5, figsize=(15, 6), facecolor='w', edgecolor='k')
-            fig.subpots_adjust(hspace=.5, wspace=.001) 
+            torch.save(hier_feas, 'hier_feas.pt')
+            torch.save(targets, 'targets.pt')
+
+            fig, axs = plt.subplots(5,2, facecolor='w', edgecolor='k')
             axs = axs.ravel()
 
             for i in range(10): 
                 projections = get_tsne(hier_feas[i], 2)
-                axs[i].scatter(projections, targets)
+                axs[i].scatter(projections[:,0], projections[:,1], c=targets)
                 axs[i].set_title("L=%s"%i)
             
+            plt.savefig('images/scatter_layers1.png')
+            plt.show()
+
+            fig.savefig('images/scatter_layers1.png')
+
+        
+        if args.from_file: 
+            hier_feas = torch.load('hier_feas.pt')
+            targets = torch.load('targets.pt')
+
+            fig, axs = plt.subplots(5,2, facecolor='w', edgecolor='k', figsize=(10,20))
+            axs = axs.ravel()
+
+            new_targets = torch.zeros_like(targets)
+            new_targets[targets<=3] = 0
+            new_targets[targets>3] = 1
+
+            for i in range(10): 
+                projections = get_tsne(hier_feas[i], 2)
+                axs[i].scatter(projections[:,0], projections[:,1], c=new_targets, s=3)
+                axs[i].set_title("L=%s"%i)
+                axs[i].set_xticks([])
+                axs[i].set_yticks([])
+          
+            
+            plt.tight_layout()
+            plt.savefig('images/scatter_layers1.png')
+            plt.show()
+
             fig.savefig('images/scatter_layers1.png')
 
         
@@ -299,12 +373,14 @@ if __name__ == '__main__':
                     num_class=args.num_classes, dataset=args.dataset, args=args)
             states = torch.load(os.path.join(args.save_path, 'model.pkl'), map_location=args.device)
             lvae.load_state_dict(states['model'])
-            lvea=lvae.to(args.device)
+            lvae=lvae.to(args.device)
             
-            test_loader_seen = DataLoader(testdata_seen, batch_size=5, shuffle=False, drop_last=False)
-            test_loader_unseen = DataLoader(testdata_unseen, batch_size=5, shuffle=False, drop_last=False)
+            # test_loader_seen = DataLoader(testdata_seen, batch_size=5, shuffle=False, drop_last=False)
+            # test_loader_unseen = DataLoader(testdata_unseen, batch_size=5, shuffle=False, drop_last=False)
+            train_loader = DataLoader(train_dataset, batch_size=5, shuffle=True, drop_last=False)
 
-            show_recon(test_loader_seen, lvae, args)
+            plot_rec(lvae, train_loader, args=args, N_plots=2)
+
 
 
 

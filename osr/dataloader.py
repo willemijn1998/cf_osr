@@ -280,7 +280,7 @@ class TinyImageNet_Dataset(Dataset):
         
         self.transform_test = transforms.Compose([transforms.Resize((32,32)),
                                                   transforms.ToTensor(),
-                                                  transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
+                                                  transforms.Normalize(mean=self.mean, std=self.std)])
         
         self.trainset = datasets.ImageFolder('./data/tiny-imagenet-200/train')
         self.testset = datasets.ImageFolder('./data/tiny-imagenet-200/val/images')
@@ -318,9 +318,10 @@ def construct_dataset_TImN(trainset, train_targets, testset, test_targets, seen_
         testdata_seen = osr_valset
         testdata_unseen = osr_testset 
         osr_valset, testset_seen, testset_unseen = val_test_split(testdata_seen, testdata_unseen, seed)
-        print(len(osr_valset), len(testset_seen), len(testset_unseen))
         osr_testset = [testset_seen, testset_unseen]
 
+    # print(osr_valset.targets, testset_seen.targets, testset_unseen.targets)
+    
     return osr_trainset, osr_valset, osr_testset
 
 def construct_ocr_dataset(trainset, testset, seen_classes, unseen_classes, transform, dataset, seed=117, correct_split=True):

@@ -20,9 +20,7 @@ mvt = importr('mvtnorm')
 
 
 
-
-
-def plot_rec(model, loader, transform, args, N_plots=5,
+def plot_rec(model, loader, args, N_plots=5,
                 mean=np.array([0.4914, 0.4822, 0.4465]), 
                 std = np.array([0.2023, 0.1994, 0.2010])): 
 
@@ -37,6 +35,9 @@ def plot_rec(model, loader, transform, args, N_plots=5,
         imgs = torch.cat((invTrans(img), invTrans(img_rec)), 0)
         grid = make_grid(imgs, nrow=5, ncol=2)
         plt.imshow(grid.permute(1,2,0))
+        plt.xticks([])
+        plt.yticks([])
+        plt.savefig('images/x_rec/c10_{}.png'.format(i))
         plt.show()
         if i == N_plots: 
             break 
@@ -48,12 +49,14 @@ def get_sample_feas(loader_seen, loader_unseen, model, args):
     with torch.no_grad(): 
         for data, target in loader_seen:
             z_mu, z_var = model.generate_sample_feas(data, args)
+            z_mu, z_var = z_mu.to(args.device), z_var.to(args.device)
             z = ut.sample_gaussian(z_mu, z_var, args.device)
             sample_feas.append(z)
             sample_tars.append(target)
 
         for data, target in loader_unseen:
             z_mu, z_var = model.generate_sample_feas(data, args)
+            z_mu, z_var = z_mu.to(args.device), z_var.to(args.device)
             z = ut.sample_gaussian(z_mu, z_var, args.device)
             sample_feas.append(z)
             sample_tars.append(target)
@@ -159,8 +162,10 @@ def scatter_plot(projections, targets, plot_name, means):
     # plt.savefig('images/%s.png' %(plot_name))
     # plt.show()
 
-    colors = ["gold", "limegreen", "lightcoral", "cornflowerblue", "slategrey", "orange", "olive"]
+    colors = ["gold", "limegreen", "lightcoral", "cornflowerblue", "black", "orange", "olive"]
     colors2 = ['darkgoldenrod', 'darkgreen', 'orangered', "midnightblue", "darkslategrey", "darkorange"]
+
+    # no_to_class = {0: "plane", 1: "car", 2: "ship", 3: "truck", 4: "unseen"}
 
     fig, ax = plt.subplots()
     x, y = projections[:,0], projections[:,1]
@@ -172,13 +177,46 @@ def scatter_plot(projections, targets, plot_name, means):
     for c in range(len(means)): 
         ax.scatter(means[c,0], means[c,1], c=colors2[c], marker=(5,2))
 
-    ax.legend()
+    # ax.legend(loc='upper right')
     ax.grid(True)
+    ax.axes.xaxis.set_ticklabels([])
+    ax.axes.yaxis.set_ticklabels([])
     # plt.title("tSNE scatter plot")
     plt.savefig('images/%s.png' %(plot_name))
 
 
     plt.show()
+
+
+
+# def scatter_plot(projections, targets, plot_name, means): 
+
+#     colors = ["gold", "limegreen", "lightcoral", "cornflowerblue", "black"]
+#     colors2 = ['darkgoldenrod', 'darkgreen', 'orangered', "midnightblue", "darkslategrey"]
+
+
+
+    
+
+#     fig, ax = plt.subplots()
+#     x, y = projections[:,0], projections[:,1]
+#     for c in range(len(means)+1):
+#         ax.scatter(x[targets==c], y[targets==c], c=colors[c], label=c,
+#                 alpha=1, s=3, edgecolors='none')
+#         # if c == 6: 
+#         #     break
+#     for c in range(len(means)): 
+#         ax.scatter(means[c,0], means[c,1], c=colors2[c], marker=(5,2))
+
+#     ax.legend()
+#     ax.grid(True)
+#     ax.axes.xaxis.set_ticklabels([])
+#     ax.axes.yaxis.set_ticklabels([])
+#     # plt.title("tSNE scatter plot")
+#     plt.savefig('images/%s.png' %(plot_name))
+
+
+#     plt.show()
         
 
 def get_class_means(train_feas, train_tars, n): 

@@ -148,7 +148,11 @@ class GAU(object):
                 prediction = labelnum
             else:
                 #Seen
-                prediction = testpre[i]
+                if args.use_likelihood: 
+                    prediction = np.argmax(delta)
+                else: 
+                    prediction = testpre[i]
+            # print(prediction, testtar[i])
 
             result.append(prediction)
 

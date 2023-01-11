@@ -12,6 +12,7 @@ from torch.autograd import Variable
 def sample_gaussian(m, v, device):
 	sample = torch.randn(m.shape).to(device)
 	z = m + (v**0.5)*sample
+
 	return z
 
 def gaussian_parameters(h, dim=-1):
@@ -44,6 +45,10 @@ def get_exp_name(opt):
 
 	if opt.lr and opt.lr != 0.001:
 		additional_str = 'lr%s' %opt.lr
+		cf_option_str.append(additional_str)
+	
+	if opt.encode_z != 10: 
+		additional_str = 'noZ'
 		cf_option_str.append(additional_str)
 
 	if opt.beta_z != 1:
@@ -216,10 +221,25 @@ def MMD(x, y, kernel, device):
 	
     return torch.mean(XX + YY - 2. * XY)
 
-def get_transforms(s, p): 
-	transform =  T.Compose([T.ColorJitter(0.8*s, 0.8*s, 0.8*s, 0.2*s), 
-							T.RandomGrayscale(p=p)])	
+class AddGaussianNoise(object):
+	def __init__(self, mean=0., std=1., device=torch.device("cuda")):
+		self.std = std
+		self.mean = mean
+		self.device = device 
+	
+	def __call__(self, tensor):
+		return tensor + torch.randn(tensor.size()).to(self.device) * self.std + self.mean
+		
+	def __repr__(self):
+		return self.__class__.__name__ + '(mean={0}, std={1})'.format(self.mean, self.std)
+	
 
+def get_transforms(s, p, dataset): 
+	if dataset == "MNIST": 
+		transform = T.Compose([AddGaussianNoise()])
+	else: 
+		transform =  T.Compose([T.ColorJitter(0.8*s, 0.8*s, 0.8*s, 0.2*s), 
+							T.RandomGrayscale(p=p)])
 	return transform 
 
 def get_test_feas(lvae, test_loader_seen, test_loader_unseen, args): 
